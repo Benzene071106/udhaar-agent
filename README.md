@@ -178,7 +178,7 @@ node build.js
 This puts `vendor/qrcode-generator.js` and `core/agent-core.js` inside `web/index.src.html` and writes:
 
 - `dist/udhaar-agent-standalone.html`: a full HTML page to open in Chrome. The server also serves this file.
-- `dist/udhaar-agent.html`: the same page without `<html>`/`<head>`, the version published as the claude.ai artifact.
+- `dist/udhaar-agent.html`: the same page without `<html>`/`<head>`, the version published as the hosted demo link.
 
 Edit `core/`, `web/` or `server/`, then rebuild. Never edit `dist/` by hand.
 

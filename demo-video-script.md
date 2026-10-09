@@ -4,7 +4,7 @@ Three speakers: **Krish**, **Harshit**, **Sarthak**. Hinglish, about 280 spoken 
 
 ## Before you record
 
-- Open the demo in **Chrome on a laptop**, window about 1366 px wide, zoom 90%. For the live mic in shot 2, use `prototype/dist/udhaar-agent-standalone.html` (the claude.ai link blocks the mic). Everything else works on either.
+- Open the demo in **Chrome on a laptop**, window about 1366 px wide, zoom 90%. For the live mic in shot 2, use `prototype/dist/udhaar-agent-standalone.html` (the hosted demo link blocks the mic). Everything else works on either.
 - Pick the **Gupta Kirana Store** shop at the top and click **Demo dobara shuru** right before recording, so the dates read "Aaj".
 - Record the screen in one take per shot. Voice-over can be recorded separately and laid on top.
 - Only say "humne baat ki" or "humne dekha" in shot 8 if the team actually spoke to shopkeepers in those areas. Otherwise use the line marked *(if no visits)*.

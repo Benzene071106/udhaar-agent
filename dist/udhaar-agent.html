@@ -289,7 +289,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
   <button class="ghost close" id="closeDay" title="Shaam ka hisaab aur cash confirm abhi bhejo">Dukaan band 🌙</button>
   <button class="next" id="nextDay" title="Shaam ka hisaab bhejo, agle din ki subah ke reminder chalao">Agle din ➜</button>
   <span class="pill" id="engine"><span class="dot"></span><span id="engineText">Samajh: <b>offline rules</b></span></span>
-  <button class="toggle" id="aiToggle" aria-pressed="false" hidden>Claude se samjho</button>
+  <button class="toggle" id="aiToggle" aria-pressed="false" hidden>AI se samjho</button>
   <button class="ghost" id="resetBtn">Demo dobara shuru</button>
 </header>
 <div class="guide" aria-label="Demo steps">
@@ -3882,7 +3882,7 @@ var qrcode = function() {
   const $ = (id) => document.getElementById(id);
   const KEY = 'udhaar-agent-v4';
   const REMOTE = window.UDHAAR_SERVER || null; // set when the page is served by this shop's own agent server
-  const AI_NAME = REMOTE ? 'AI' : 'Claude';
+  const AI_NAME = 'AI';
   const localToday = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 
   let shops = {}, cur = 'gupta', engineInfo = null;
@@ -4085,7 +4085,7 @@ var qrcode = function() {
     }
     const on = aiOn && sample;
     $('engine').classList.toggle('on', !!on);
-    $('engineText').innerHTML = 'Samajh: <b>' + (on ? 'Claude (AI)' : 'offline rules') + '</b>';
+    $('engineText').innerHTML = 'Samajh: <b>' + (on ? 'AI' : 'offline rules') + '</b>';
     $('aiToggle').hidden = !sample;
     $('aiToggle').setAttribute('aria-pressed', on ? 'true' : 'false');
   }
@@ -4175,7 +4175,7 @@ var qrcode = function() {
   let toastT;
   function toast(t) { const el = $('toast'); el.textContent = t; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { el.hidden = true; }, 4200); }
 
-  // ---------- understanding: Claude when available, rules otherwise ----------
+  // ---------- understanding: the LLM when available, rules otherwise ----------
   const INTENTS = ['credit', 'payment', 'query', 'summary', 'remind', 'remind_all', 'undo', 'set_phone', 'promise', 'help', 'unknown'];
   async function understand(text) {
     const rules = C.parseOwnerMessage(text, state.today);
@@ -4187,8 +4187,8 @@ var qrcode = function() {
       if (!j || INTENTS.indexOf(j.intent) < 0) return rules;
       return C.intentFromLlm(j, text);
     } catch (e) {
-      if (e && e.code === 'not_granted') { aiOn = false; toast('Claude ki anumati nahi mili. Offline rules se samajh raha hoon.'); }
-      else if (e && e.code === 'rate_limited') toast('Claude abhi busy hai. Is baar offline rules se samjha.');
+      if (e && e.code === 'not_granted') { aiOn = false; toast('AI ki anumati nahi mili. Offline rules se samajh raha hoon.'); }
+      else if (e && e.code === 'rate_limited') toast('AI abhi busy hai. Is baar offline rules se samjha.');
       renderEngine();
       return rules;
     }
@@ -4401,7 +4401,7 @@ var qrcode = function() {
     if (busy) return; busy = true; await safeAct('reset'); busy = false;
     freshTxn = null; ticker.length = 0; renderTicker(); $('sheet').hidden = true; render(); toast('Demo dobara shuru. Aaj ki tareekh se.');
   });
-  $('aiToggle').addEventListener('click', () => { aiOn = !aiOn; renderEngine(); save(); toast(aiOn ? 'Ab Claude samjhega. Pehli baar anumati maangi ja sakti hai.' : 'Ab offline rules se samjhega.'); });
+  $('aiToggle').addEventListener('click', () => { aiOn = !aiOn; renderEngine(); save(); toast(aiOn ? 'Ab AI samjhega. Pehli baar anumati maangi ja sakti hai.' : 'Ab offline rules se samjhega.'); });
 
   // ---------- boot ----------
   if (REMOTE) {

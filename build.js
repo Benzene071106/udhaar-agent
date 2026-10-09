@@ -1,5 +1,5 @@
 // Inlines core/agent-core.js into the web page. Outputs:
-//   dist/udhaar-agent.html             page body (published as the claude.ai Artifact)
+//   dist/udhaar-agent.html             page body (published as the hosted demo link)
 //   dist/udhaar-agent-standalone.html  full HTML document (open in Chrome for live mic, or serve from any host)
 const fs = require('fs');
 const path = require('path');
