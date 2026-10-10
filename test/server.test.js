@@ -192,3 +192,37 @@ test('the Dockerfile builds the page and serves port 8000', () => {
   assert.match(df, /CMD \["node", "server\/server\.js"\]/);
   for (const f of ['core', 'web', 'vendor', 'server', 'build.js']) assert.ok(df.includes('COPY ' + f), f);
 });
+
+test('copy photo over HTTP: the server asks its own AI, proposes lines, writes only after ✅; no AI says so', async () => {
+  const reading = { format: 'daily_list', page_date: TODAY, language: 'hindi', customer: '', lines: [{ name: 'Sharma ji', amount: 240, type: 'credit', date: '', items: 'atta', raw: 'शर्मा 240', sure: true }] };
+  const llm = fakeLlm(reading);
+  const lu = await listen(llm);
+  const s = createServer({ env: { SHOP: 'gupta', DATA_DIR: tmpDir(), AGENT37_LLM_PROXY_URL: lu }, today: () => TODAY });
+  const u = await listen(s);
+  const img = 'data:image/jpeg;base64,' + Buffer.from('fake jpeg bytes').toString('base64');
+  const photo = (body) => fetch(u + '/api/photo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  try {
+    const n = s.getState().txns.length;
+    let r = await photo({ image: img, mode: 'daily' });
+    assert.equal(r.status, 200);
+    const j = await r.json();
+    const sent = llm.seen[0].body.messages[0].content;
+    assert.equal(sent[1].type, 'image_url'); assert.equal(sent[1].image_url.url, img);
+    assert.match(sent[0].text, /handwritten udhaar/);
+    assert.equal(j.state.txns.length, n, 'nothing written yet');
+    const rv = j.state.copyReviews[0];
+    assert.equal(rv.lines[0].status, 'new');
+    assert.ok(!JSON.stringify(j.state).includes('fake jpeg'), 'the photo is not stored');
+    r = await act(u, 'copyConfirmAll', { reviewId: rv.id });
+    assert.equal(r.body.state.txns.length, n + 1);
+    // a reading pushed by the browser is refused
+    assert.equal((await act(u, 'copyRead', { reading })).status, 400);
+    assert.equal((await photo({ image: 'data:text/html;base64,PGI+', mode: 'daily' })).status, 400);
+  } finally { s.close(); llm.close(); }
+  const s2 = createServer({ env: { SHOP: 'gupta', DATA_DIR: tmpDir() }, today: () => TODAY });
+  const u2 = await listen(s2);
+  try {
+    const r = await fetch(u2 + '/api/photo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: img }) });
+    assert.equal(r.status, 409); assert.deepEqual(await r.json(), { error: 'no_ai' });
+  } finally { s2.close(); }
+});

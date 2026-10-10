@@ -1,6 +1,6 @@
 # Udhaar Agent
 
-An AI munshi for a kirana shop. The shopkeeper speaks a Hindi or Hinglish voice note ("Sharma ji ne 340 ka saaman liya, kal denge"), and the agent writes it into the khata. It sends the customer reminders that get firmer as the due ages, and it clears the due when the customer pays by cash or UPI. The Galla Mic writes the khata from the shopkeeper's normal talk at the counter. Each shop has its own agent with its own khata, and a dashboard shows the total baaki, who is late, and the collection rate. The khata also gives each customer a credit score, which a lender can see only if the customer says yes on their own phone.
+An AI munshi for a kirana shop. The shopkeeper speaks a Hindi or Hinglish voice note ("Sharma ji ne 340 ka saaman liya, kal denge") and the agent writes it into the khata. **Do-taraf khata:** every new entry goes to the customer's WhatsApp with **Haan, sahi hai** / **Galat hai**, so both sides agree on the record (✓ in the owner's khata), and a "galat hai" lands in the owner's evening ✅/❌ batch. The agent sends reminders that get firmer as the due ages, and clears the due when the customer pays by cash or UPI. The Galla Mic writes the khata from the shopkeeper's normal talk at the counter. Each shop has its own agent with its own khata, and a dashboard shows the total baaki, who is late, and the collection rate. The khata also gives each customer a credit score, which a lender can see only if the customer says yes on their own phone. Reading a photo of the paper copy is kept as a **future / experimental** feature.
 
 Everything after the voice note is simulated: no real WhatsApp messages are sent and no real UPI money moves.
 
@@ -18,10 +18,47 @@ Demo flow (the 2-minute video follows it shot by shot in `demo-video-script.md`)
 
 Opened as a file, the demo keeps each shop's state in the browser's local storage. **Demo dobara shuru** resets the current shop.
 
+## Do-taraf khata (customer confirms on WhatsApp)
+
+- **Every new entry** (udhaar, or jama the owner reports) goes to the customer with **Haan, sahi hai** and **Galat hai**. Entries the customer reported themselves, UPI payments, old entries and customers without a number are not asked.
+- **Haan** puts **✓ grahak ne maana** on that row of the owner's khata.
+- **Galat hai** goes into the owner's evening batch next to the cash claims. ✅ means the entry stays (the customer is told to talk at the shop); ❌ means it was a mistake, and the entry is removed with an apology to the customer. Neither one counts as a dispute in the credit score.
+- **Monthly statement:** on the 1st of each month (or the **📄 Mahine ka hisaab** button) every customer with a balance gets their total and last entries, with the same two buttons. Haan shows **✓ Grahak ne maana** in the baaki list while the balance is unchanged.
+
+## Copy photo (future / experimental)
+
+Not the owner's first action: voice and text are. The 📷 button stays for trying it out. Reading accuracy on real handwritten copies is untested.
+
+
+Two uses, one pipeline:
+
+- **First day (setup):** the owner photographs each page of the old copy. The agent reads what each customer owes now and proposes opening balances. One **Sab sahi ✅** fills the khata, with no typing.
+- **Every evening (daily page):** if the shop keeps a date-wise list, the owner photographs today's page. The agent proposes today's entries.
+
+How it works:
+
+1. An AI that can see images reads the photo into lines: name, amount, and udhaar, jama or total baaki. Hindi, Marathi, English, Devanagari or Latin script are all accepted. Unclear lines are marked "⚠ saaf nahi padha".
+2. Each line is checked against the khata. An entry already there shows as "pehle se khate mein ✓" and is never added twice; matching is one to one, so two identical lines need two identical entries. For a total baaki, only the difference from the khata is proposed.
+3. Nothing is written until the owner taps ✅ on a line or **Sab sahi ✅**. ✏️ changes the customer, amount or type; ❌ skips the line. A name that fits two customers waits until the owner picks one.
+4. After ✅, reminders, cash claims and the dashboard carry on as before.
+
+The photo itself is never stored, only the confirmed entries.
+
+Where it runs:
+- **Demo link:** reading uses the page's AI with image input, so the viewer is asked once to allow sending images.
+- **Agent37 server:** reading uses `POST /api/photo` with the router's model. Set `VISION_MODEL` if the default model can't see images.
+- **Standalone file and GitHub Pages:** there is no AI, so the page says so and reads nothing. It never guesses.
+
+The **Purani copy ka page** and **Aaj ka page** samples draw a handwritten-style page in the browser and send that image to the AI. Nothing is pre-filled.
+
+Real accuracy on handwritten copies is not yet measured. It needs real pages.
+
 ## What is real and what is simulated
 
 | Real (running code) | Simulated in the demo |
 |---|---|
+| Customer Haan / Galat on each entry and monthly statement, ✓ in the khata, galat into the evening batch |  |
+| Copy photo to khata, experimental (reading needs an AI; dedupe and ✅ are plain code) |  |
 | Voice or text to khata (Hinglish and Devanagari), with the LLM or the offline rules | WhatsApp: messages show in the on-screen phones; none are sent |
 | Reminder ladder on the due date, +3 days and +7 days | UPI: the pay sheet and bank SMS are generated; no money moves |
 | Matching UPI SMS to customers; cash claims with the evening ✅/❌ batch | The lender (Saathi Finance) and the data share |
@@ -64,7 +101,8 @@ Open http://localhost:8000. No npm install is needed.
 | Variable | Meaning |
 |---|---|
 | `PORT` | Port to listen on. Default `8000`. |
-| `SHOP` | Demo shop to seed: `gupta` or `balaji`. Default `gupta`. |
+| `SHOP` | Demo shop to seed: `gupta`, `balaji`, or `nayi` (an empty khata, for photo setup). Default `gupta`. |
+| `VISION_MODEL` | Optional model id for reading copy photos; it must accept images. Unset means `LLM_MODEL` or the router's default. |
 | `DATA_DIR` | Folder for the khata file (`<shop>.json`). Default `./data`. |
 | `AGENT37_LLM_PROXY_URL` | OpenAI-compatible LLM router. Agent37 sets this on every instance. If it is unset, the offline rule parser does all the understanding. |
 | `AGENT37_MANAGED_TOKEN` | Bearer token for that router. Agent37 sets it and renews it on restart; the server reads it on every call. |
@@ -75,7 +113,7 @@ Open http://localhost:8000. No npm install is needed.
 
 When the LLM is slow, down, or replies with something that isn't a valid ledger action, the server uses the offline Hinglish rules for that message and the page shows "offline rules". An intent sent by the browser is ignored: the server decides what the words mean.
 
-Endpoints: `GET /` (the page), `GET /healthz`, `GET /api/state`, `POST /api/act` with `{"action": "...", "args": {...}}`. Actions: `owner`, `upi`, `customer`, `confirm`, `galla`, `closeDay`, `nextDay`, `reset`.
+Endpoints: `GET /` (the page), `GET /healthz`, `GET /api/state`, `POST /api/act` with `{"action": "...", "args": {...}}`. Actions: `owner`, `upi`, `customer`, `confirm`, `galla`, `closeDay`, `nextDay`, `consentRequest`, `consentAnswer`, `consentRevoke`, `statements`, `customerCheck`, `copyDecide`, `copyConfirmAll`, `reset`. `POST /api/photo` with `{"image": "data:image/jpeg;base64,...", "mode": "daily" | "setup"}` reads a copy photo (409 `no_ai` when the server has no LLM). A reading sent by the browser to `/api/act` is refused.
 
 ## Deploy on Agent37 (one sandbox per shop)
 
@@ -188,10 +226,10 @@ Edit `core/`, `web/` or `server/`, then rebuild. Never edit `dist/` by hand.
 node --test test/core.test.js test/server.test.js
 ```
 
-There are 27 tests:
+There are 34 tests:
 
-- **Core (18):** parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
-- **Server (9):**
+- **Core (24):** do-taraf khata (Haan sets ✓, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
+- **Server (10):**
   - each shop keeps its own khata file and it survives a restart
   - the page is served with the shop config
   - the full loop over HTTP
@@ -199,6 +237,7 @@ There are 27 tests:
   - the LLM router is called with the right token
   - rules take over when the LLM fails, stalls or talks nonsense
   - consent over HTTP
+  - copy photo over HTTP (the server's own AI reads it, the photo isn't stored, a browser-sent reading is refused, no AI returns `no_ai`)
   - the scheduler sends reminders on a new day and the evening summary once
   - the Dockerfile builds the page, turns the scheduler on, and listens on port 8000
 

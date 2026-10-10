@@ -3,7 +3,7 @@
 //
 // Environment:
 //   PORT                   default 8000
-//   SHOP                   demo shop to seed: gupta | balaji (default gupta)
+//   SHOP                   demo shop to seed: gupta | balaji | nayi (empty khata) (default gupta)
 //   DATA_DIR               where the shop's khata is saved (default ./data)
 //   AGENT37_LLM_PROXY_URL  OpenAI-compatible LLM router; Agent37 sets this on every instance
 //   AGENT37_MANAGED_TOKEN  bearer token for that router; Agent37 sets it and renews it on restart
@@ -11,6 +11,7 @@
 //   LLM_TIMEOUT_MS         default 8000; after this the offline rules answer instead
 //   REAL_CLOCK             1 = the agent's own scheduler: each new calendar day it runs the morning reminders,
 //                          and at EVENING_HOUR (default 21) it sends the evening summary and cash batch
+//   VISION_MODEL           optional model id for reading copy photos (must accept images); unset = LLM_MODEL or router default
 //   OTHER_SHOPS            optional "Name|https://url,Name|https://url" for the shop switcher
 //
 // Without the LLM variables, or when the LLM call fails, the offline Hinglish rule parser answers.
@@ -22,6 +23,7 @@ const C = require('../core/agent-core.js');
 
 const ROOT = path.join(__dirname, '..');
 const MAX_BODY = 16 * 1024;
+const MAX_PHOTO = 4 * 1024 * 1024; // a copy photo, already shrunk by the page
 
 function localToday() {
   const d = new Date();
@@ -98,6 +100,37 @@ function createServer(opts) {
     } finally { clearTimeout(timer); }
   }
 
+  // Read a photo of the paper copy with the router's model. The reading only proposes lines; the owner confirms each.
+  async function readPhoto(dataUrl, mode) {
+    if (!llmUrl) throw Object.assign(new Error('no_ai'), { code: 409 });
+    if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(dataUrl)) throw Object.assign(new Error('send a JPEG, PNG or WebP image'), { code: 400 });
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), Math.max(timeoutMs, 45000));
+    engine.llmCalls++;
+    try {
+      const headers = { 'content-type': 'application/json' };
+      if (env.AGENT37_MANAGED_TOKEN) headers.authorization = 'Bearer ' + env.AGENT37_MANAGED_TOKEN;
+      const res = await fetchImpl(llmUrl + '/chat/completions', {
+        method: 'POST', headers, signal: ctrl.signal,
+        body: JSON.stringify({
+          ...(env.VISION_MODEL || model ? { model: env.VISION_MODEL || model } : {}), temperature: 0, max_tokens: 3000,
+          messages: [{ role: 'user', content: [{ type: 'text', text: C.copyReadRequest(state, mode) }, { type: 'image_url', image_url: { url: dataUrl } }] }]
+        })
+      });
+      if (!res.ok) throw new Error('LLM HTTP ' + res.status);
+      const j = await res.json();
+      const content = String((((j.choices || [])[0] || {}).message || {}).content || '');
+      const m = content.match(/\{[\s\S]*\}/);
+      if (!m) throw new Error('LLM reply had no JSON');
+      engine.lastError = null;
+      return JSON.parse(m[0]);
+    } catch (e) {
+      engine.llmFallbacks++;
+      engine.lastError = e.name === 'AbortError' ? 'LLM timeout' : String(e.message || e).slice(0, 200);
+      throw Object.assign(new Error('read_failed'), { code: 502 });
+    } finally { clearTimeout(timer); }
+  }
+
   function snapshot(extra) {
     return Object.assign({
       state, dashboard: C.dashboard(state, 30), shopId,
@@ -118,12 +151,13 @@ function createServer(opts) {
     res.end(buf);
   }
 
-  function readBody(req) {
+  function readBody(req, max) {
+    max = max || MAX_BODY;
     return new Promise((resolve, reject) => {
       let size = 0; const chunks = [];
       // Past the limit, keep draining (so the client still gets the 413) but stop keeping bytes.
-      req.on('data', (c) => { size += c.length; if (size <= MAX_BODY) chunks.push(c); });
-      req.on('end', () => size > MAX_BODY ? reject(Object.assign(new Error('body too large'), { code: 413 })) : resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('data', (c) => { size += c.length; if (size <= max) chunks.push(c); });
+      req.on('end', () => size > max ? reject(Object.assign(new Error('body too large'), { code: 413 })) : resolve(Buffer.concat(chunks).toString('utf8')));
       req.on('error', reject);
     });
   }
@@ -137,6 +171,7 @@ function createServer(opts) {
     if (C.ACTIONS.indexOf(action) < 0) throw Object.assign(new Error('unknown action'), { code: 400 });
     const a = Object.assign({}, args);
     delete a.intent; // never trust an intent from the browser
+    if (action === 'copyRead') throw Object.assign(new Error('send the photo to /api/photo'), { code: 400 }); // readings come from this server's AI only
     if (action === 'owner' && !C.looksLikeUpiSms(String(a.text || ''))) a.intent = await understand(String(a.text || '').slice(0, 500));
     let out;
     try { out = C.runAction(state, action, a); } catch (e) { throw Object.assign(e, { code: 400 }); }
@@ -157,6 +192,17 @@ function createServer(opts) {
         let body;
         try { body = JSON.parse(await readBody(req) || '{}'); } catch (e) { return send(res, e.code === 413 ? 413 : 400, { error: e.code === 413 ? 'body too large' : 'bad JSON' }); }
         const out = await serial(() => act(String(body.action || ''), body.args || {}));
+        return send(res, 200, out);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/photo') {
+        if (!/application\/json/.test(req.headers['content-type'] || '')) return send(res, 415, { error: 'send JSON' });
+        if (+req.headers['content-length'] > MAX_PHOTO) { res.setHeader('connection', 'close'); return send(res, 413, { error: 'photo too large' }); }
+        if (!llmUrl) return send(res, 409, { error: 'no_ai' });
+        let body;
+        try { body = JSON.parse(await readBody(req, MAX_PHOTO) || '{}'); } catch (e) { return send(res, e.code === 413 ? 413 : 400, { error: e.code === 413 ? 'photo too large' : 'bad JSON' }); }
+        const mode = body.mode === 'setup' ? 'setup' : 'daily';
+        const reading = await readPhoto(String(body.image || ''), mode); // the photo itself is never saved
+        const out = await serial(() => { const r = C.runAction(state, 'copyRead', { reading, mode }); save(); return snapshot({ freshTxn: null, result: r.result }); });
         return send(res, 200, out);
       }
       return send(res, 404, { error: 'not found' });

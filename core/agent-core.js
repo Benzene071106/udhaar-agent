@@ -340,7 +340,7 @@
 
   const claims = (state) => (state.cashClaims = state.cashClaims || []);
   /** Cash the customer says they paid, waiting for the owner's tap. Not counted in the balance until confirmed. */
-  const pendingCash = (state, custId) => claims(state).filter((k) => k.custId === custId && k.status === 'pending' && k.type !== 'credit').reduce((s, k) => s + k.amount, 0);
+  const pendingCash = (state, custId) => claims(state).filter((k) => k.custId === custId && k.status === 'pending' && k.type !== 'credit' && k.type !== 'check').reduce((s, k) => s + k.amount, 0);
 
   function addCustomer(state, name, key, extra) {
     const c = Object.assign({ id: nextId(state, 'C'), name, key, phone: null, vpas: [], dueDate: null, lastReminder: null, reminderLevel: 0, createdAt: state.today }, extra || {});
@@ -707,6 +707,7 @@
 
   function claimLabel(state, k) {
     const n = getCust(state, k.custId).name;
+    if (k.type === 'check') return n + ' ne ' + k.label + ' ko galat bataya. ✅ = aapki entry sahi hai, ❌ = galti thi, theek karo';
     if (k.type === 'credit') return n + ': ' + rupees(k.amount) + ' udhaar? (Galla Mic ne suna)';
     return n + ': ' + rupees(k.amount) + ' cash' + (k.origin === 'galla' ? '? (Galla Mic ne suna' + (k.why ? ', ' + k.why : '') + ')' : ' (grahak ne bataya)');
   }
@@ -717,6 +718,7 @@
     if (!k || k.status !== 'pending') return out;
     const c = getCust(state, k.custId);
     k.resolvedOn = state.today;
+    if (k.type === 'check') return resolveCheck(state, k, c, ok, out);
     if (k.origin === 'galla' && !ok) {
       k.status = 'dropped';
       emit(state, out, 'owner', '👍 Theek hai, ' + c.name + ' ka ' + rupees(k.amount) + ' nahi likha.', { kind: 'cash-done' });
@@ -998,7 +1000,9 @@
         ['Rathod ji', 0.7, [1750, 'doodh, ghee', -12, 9]], ['Wagh madam', 0.95, [520, 'dahi, lassi', -2, 4]],
         ['Dhote ji', 0.6, [3100, 'doodh 2 mahine, paneer', -28, 6], false], ['Gajbhiye ji', 0.75, [880, 'doodh, bread', -3, 10]]
       ]
-    }
+    },
+    // an empty khata, to show first-day setup from photos of the old copy
+    nayi: { shop: { id: 'nayi', name: 'Nayi dukaan (khali khata)', owner: '', upiId: 'nayidukaan@upi', city: 'Nagpur' }, seed: 1, people: [], open: [] }
   };
 
   function seedDemo(state, which) {
@@ -1058,7 +1062,7 @@
       const tx = state.txns.filter((t) => !t.voided && t.date === d);
       daily.push({ date: d, credit: tx.filter((t) => t.type === 'credit').reduce((s, t) => s + t.amount, 0), payment: tx.filter((t) => t.type === 'payment').reduce((s, t) => s + t.amount, 0) });
     }
-    const pendingClaims = claims(state).filter((k) => k.status === 'pending');
+    const pendingClaims = claims(state).filter((k) => k.status === 'pending' && k.type !== 'check');
     const prof = shopProfile(state, 90);
     return {
       shop: state.shop.name, asOf: T, windowDays: days,
@@ -1101,14 +1105,261 @@
     };
   }
 
+  // ---------------------------------------------- copy photo: the paper copy stays, a photo feeds the khata
+  // The owner keeps writing in the copy and sends one photo at closing. An AI that can see images turns the photo
+  // into a "reading" (see copyReadRequest). Nothing is written until the owner taps ✅: each line is checked
+  // against the khata, and lines already there are shown but never added twice.
+  const COPY_SCHEMA = {
+    type: 'object',
+    properties: {
+      format: { type: 'string', enum: ['per_customer', 'daily_list', 'balance_list', 'unclear'] },
+      page_date: { type: 'string' },
+      language: { type: 'string' },
+      customer: { type: 'string' },
+      lines: { type: 'array', items: { type: 'object', properties: {
+        name: { type: 'string' }, amount: { type: 'number' }, type: { type: 'string', enum: ['credit', 'payment', 'balance'] },
+        date: { type: 'string' }, items: { type: 'string' }, raw: { type: 'string' }, sure: { type: 'boolean' }
+      }, required: ['name', 'amount', 'type', 'date', 'items', 'raw', 'sure'] } }
+    },
+    required: ['format', 'page_date', 'language', 'customer', 'lines']
+  };
+  /**
+   * mode 'setup': first day; the owner photographs the pages of the old copy and we want what each customer owes NOW (opening balances).
+   * mode 'daily': the owner photographs today's page; we want each entry written today.
+   */
+  function copyReadRequest(state, mode) {
+    const setup = mode === 'setup';
+    const names = state.customers.map((c) => c.name).join(', ') || '(none yet)';
+    return 'You are reading a photo of a handwritten udhaar (credit) copy from an Indian kirana shop. It may be in Hindi, Marathi, English or a mix, ' +
+      'in Devanagari or Latin script, with Devanagari or Western digits and short forms (e.g. "Sh." for Sharma).\n' +
+      'There are two common layouts:\n' +
+      '- per_customer: the page belongs to ONE customer (name at the top); each row has a date, an amount, and whether it was udhaar/credit (often "naam", "udhaar", "baaki", left column) or jama/paid (often "jama", "जमा", "diya", right column).\n' +
+      '- daily_list: the page is one day (date at the top); each line is a customer name and an amount, with "jama"/"जमा"/"pd"/"paid" or a tick meaning payment, otherwise credit.\n' +
+      '- balance_list: a list of customers with what each one owes in total (baaki, बाकी, उधारी, total).\n' +
+      (setup ? 'THE OWNER IS SETTING UP: for every customer on the page report ONE line with type "balance" and amount = what that customer owes now as written ' +
+        '(the last running total or "baaki" on a per_customer page; the amount on a balance_list). Do not report individual rows.\n'
+        : 'Report each written entry as one line of type "credit" or "payment".\n') +
+      'Today is ' + state.today + '. The shop\'s customers: ' + names + '. When a written name is clearly one of these, use that spelling; otherwise write the name in Latin letters as written.\n' +
+      'Rules: only report what is written; never invent a line, a name or an amount. If a number or name cannot be read, set "sure" to false and give your best reading in "raw". ' +
+      'Ignore running totals, crossed-out lines and page numbers. Dates as YYYY-MM-DD (assume the current year when the year is missing; "" if no date). "customer" is the page\'s customer for per_customer pages, else "". ' +
+      'If the photo is not a khata page, return format "unclear" and no lines.\n' +
+      'Reply with only one JSON object with these keys: format, page_date, language, customer, lines (each line: name, amount, type, date, items, raw, sure). JSON schema: ' + JSON.stringify(COPY_SCHEMA);
+  }
+  /** Keep only well-formed lines from an AI reading; never trust its shape. */
+  function cleanReading(r, today) {
+    r = r && typeof r === 'object' ? r : {};
+    const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d || '') && d <= today ? d : '';
+    const str = (v, n) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
+    const format = ['per_customer', 'daily_list'].indexOf(r.format) >= 0 ? r.format : 'unclear';
+    const pageDate = isDate(r.page_date), pageCust = str(r.customer, 40);
+    const lines = (Array.isArray(r.lines) ? r.lines : []).slice(0, 60).map((l) => {
+      l = l && typeof l === 'object' ? l : {};
+      const amount = Math.round(Number(String(l.amount).replace(/[^\d.]/g, '')) || 0);
+      const name = str(l.name, 40) || (format === 'per_customer' ? pageCust : '');
+      return { name, amount, type: l.type === 'payment' || l.type === 'balance' ? l.type : 'credit', date: isDate(l.date) || pageDate || today, items: str(l.items, 60), raw: str(l.raw, 80), sure: l.sure !== false };
+    }).filter((l) => l.name && (l.amount > 0 || l.type === 'balance') && l.amount >= 0 && l.amount <= 100000);
+    return { format, pageDate, customer: pageCust, language: str(r.language, 20), lines };
+  }
+  // Match one line to a customer and to the khata. `taken` holds txn ids already matched by other lines,
+  // so two identical lines on the page match at most two identical khata entries.
+  function checkCopyLine(state, l, taken) {
+    let custId = l.custId || null, options = [];
+    if (!custId && !l.newCustomer) {
+      const m = findCustomers(state, nameKey(tokenize(l.name).norm));
+      if (m.length === 1) custId = m[0].id; else options = m.map((c) => c.id);
+    }
+    l.custId = custId; l.options = options; l.txnId = null; l.adjust = null;
+    if (l.type === 'balance') {
+      // an opening balance: compare with what the khata says now, and propose only the difference
+      if (!custId) { l.status = options.length > 1 ? 'ambiguous' : (l.amount > 0 ? 'newcust' : 'already'); l.adjust = l.amount; return l; }
+      const diff = Math.round(l.amount - balance(state, custId));
+      l.adjust = diff; l.status = Math.abs(diff) < 1 ? 'already' : 'new';
+      return l;
+    }
+    if (custId) {
+      const dup = state.txns.find((t) => !t.voided && !taken.has(t.id) && t.custId === custId && t.type === l.type &&
+        Math.abs(t.amount - l.amount) < 0.5 && Math.abs(daysBetween(t.date, l.date)) <= 1);
+      if (dup) { taken.add(dup.id); l.status = 'already'; l.txnId = dup.id; return l; }
+      l.status = 'new';
+    } else l.status = options.length > 1 ? 'ambiguous' : 'newcust';
+    return l;
+  }
+  const reviewOf = (state, id) => (state.copyReviews || []).find((r) => r.id === id);
+  function recheckReview(state, rv) {
+    const taken = new Set(rv.lines.filter((l) => l.decision === 'ok' && l.txnId).map((l) => l.txnId));
+    for (const l of rv.lines) if (l.decision === 'pending') checkCopyLine(state, l, taken);
+  }
+  function readCopy(state, reading, mode) {
+    const out = [];
+    state.messages.push({ id: nextId(state, 'M'), to: 'agent', from: 'owner', source: 'photo', text: '📷 Copy ka photo · ' + (mode === 'setup' ? 'purani copy (sabka baaki)' : 'aaj ka page'), date: state.today, ts: Date.now() });
+    const r = cleanReading(reading, state.today);
+    if (!r.lines.length) {
+      emit(state, out, 'owner', r.format === 'unclear' ? 'Is photo mein khate ka page samajh nahi aaya. Page seedha rakhkar, achhi roshni mein dobara photo bhejiye.' : 'Page padha, par koi entry saaf nahi dikhi. Dobara photo bhejiye, ya voice note se bataiye.', { kind: 'copy' });
+      return out;
+    }
+    const rv = { id: nextId(state, 'R'), date: state.today, format: r.format, pageDate: r.pageDate, customer: r.customer, language: r.language, open: true, lines: [] };
+    const taken = new Set();
+    r.lines.forEach((l, i) => rv.lines.push(checkCopyLine(state, Object.assign({ id: rv.id + '-' + (i + 1), decision: 'pending' }, l), taken)));
+    (state.copyReviews = state.copyReviews || []).push(rv);
+    const fresh = rv.lines.filter((l) => l.status !== 'already').length;
+    emit(state, out, 'owner', 'Maine copy ka page padha' + (r.pageDate ? ' (' + fmtDate(r.pageDate) + ')' : '') + ': ' + rv.lines.length + ' line. ' +
+      (fresh ? fresh + ' nayi entry; ' : 'Koi nayi entry nahi; ') + (rv.lines.length - fresh) + ' pehle se khate mein.\nHar line dekhiye: ✅ sahi, ✏️ badlo, ❌ chhodo. Jab tak aap ✅ nahi dabate, kuch nahi likha jaata.', { kind: 'copy-review', reviewId: rv.id });
+    log(state, 'copy', 'read copy page: ' + rv.lines.length + ' lines, ' + fresh + ' new');
+    return out;
+  }
+  function applyCopyLine(state, l) {
+    let c = l.custId && getCust(state, l.custId);
+    if (!c) { c = addCustomer(state, prettyName(tokenize(l.name).display) || l.name, nameKey(tokenize(l.name).norm), { createdAt: l.date }); l.custId = c.id; }
+    if (l.type === 'balance') {
+      // opening balance: one entry for the difference, dated today, so no reminder goes out for an old date
+      const diff = l.custId && l.adjust != null ? l.adjust : l.amount;
+      const tx = { id: nextId(state, 'T'), custId: c.id, amount: Math.abs(diff), date: state.today, note: l.raw || 'copy', source: 'copy', via: 'photo', matchedBy: 'copy ka photo, aapne confirm kiya' };
+      if (diff > 0) { const due = c.dueDate && c.dueDate > state.today ? c.dueDate : addDays(state.today, state.shop.defaultDays || 7); state.txns.push(Object.assign(tx, { type: 'credit', items: 'purana baaki (copy se)', dueDate: due })); c.dueDate = due; }
+      else { state.txns.push(Object.assign(tx, { type: 'payment', note: 'hisaab copy se milaya' })); if (balance(state, c.id) <= 0) { c.dueDate = null; c.reminderLevel = 0; } }
+      l.txnId = tx.id; l.decision = 'ok';
+      return c;
+    }
+    const base = { id: nextId(state, 'T'), custId: c.id, amount: l.amount, date: l.date, note: l.raw || 'copy', source: 'copy', via: 'photo', matchedBy: 'copy ka photo, aapne confirm kiya' };
+    if (l.type === 'credit') {
+      const due = c.dueDate && c.dueDate > state.today && balance(state, c.id) > 0 ? c.dueDate : addDays(l.date, state.shop.defaultDays || 7);
+      state.txns.push(Object.assign(base, { type: 'credit', items: l.items || '', dueDate: due }));
+      if (!c.dueDate || c.dueDate !== due) { c.dueDate = due; c.reminderLevel = 0; c.lastReminder = null; }
+    } else {
+      state.txns.push(Object.assign(base, { type: 'payment' }));
+      if (balance(state, c.id) <= 0) { c.dueDate = null; c.reminderLevel = 0; }
+    }
+    l.txnId = base.id; l.decision = 'ok';
+    return c;
+  }
+  /** One line: ok (write it), skip, or edit {custId | name (new customer), amount, type, date}. */
+  function decideCopyLine(state, lineId, decision, edit) {
+    const out = [];
+    const rv = reviewOf(state, String(lineId).split('-')[0]);
+    const l = rv && rv.open && rv.lines.find((x) => x.id === lineId);
+    if (!l || l.decision !== 'pending') return out;
+    if (decision === 'edit' && edit) {
+      if (edit.custId && getCust(state, edit.custId)) { l.custId = edit.custId; l.newCustomer = false; l.name = getCust(state, edit.custId).name; }
+      else if (edit.name) { l.name = String(edit.name).slice(0, 40).trim() || l.name; l.custId = null; l.newCustomer = !!edit.newCustomer; }
+      if (+edit.amount >= (l.type === 'balance' ? 0 : 1) && +edit.amount <= 100000) l.amount = Math.round(+edit.amount);
+      if (['credit', 'payment', 'balance'].indexOf(edit.type) >= 0) l.type = edit.type;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(edit.date || '') && edit.date <= state.today) l.date = edit.date;
+      l.sure = true; l.edited = true;
+      recheckReview(state, rv);
+      return out;
+    }
+    if (decision === 'skip') l.decision = 'skip';
+    else if (decision === 'ok') {
+      if (l.status === 'already' || l.status === 'ambiguous') return out; // already in the khata, or the owner must pick who
+      applyCopyLine(state, l);
+      recheckReview(state, rv);
+    }
+    closeIfDone(state, rv, out);
+    return out;
+  }
+  function closeIfDone(state, rv, out) {
+    if (rv.lines.some((l) => l.decision === 'pending' && l.status !== 'already')) return;
+    rv.open = false;
+    const added = rv.lines.filter((l) => l.decision === 'ok');
+    const names = [...new Set(added.map((l) => getCust(state, l.custId).name))];
+    emit(state, out, 'owner', added.length ? '✅ Copy se ' + added.length + ' entry khate mein likh di.' + names.map((n) => {
+      const c = state.customers.find((x) => x.name === n); return '\n' + n + ': baaki ' + rupees(Math.max(0, balance(state, c.id)));
+    }).join('') + '\nReminder aur cash ka hisaab ab pehle jaisa chalega.' : 'Copy ke page se kuch nahi likha.', { kind: 'copy' });
+  }
+  /** "Sab sahi ✅": write every new line still waiting; lines that need a choice stay open. */
+  function confirmCopyAll(state, reviewId) {
+    const out = [];
+    const rv = reviewOf(state, reviewId); if (!rv || !rv.open) return out;
+    for (const l of rv.lines) if (l.decision === 'pending' && (l.status === 'new' || l.status === 'newcust')) { applyCopyLine(state, l); recheckReview(state, rv); }
+    const left = rv.lines.filter((l) => l.decision === 'pending' && l.status === 'ambiguous');
+    if (left.length) emit(state, out, 'owner', left.length + ' line mein naam pakka nahi: ' + left.map((l) => l.name).join(', ') + '. ✏️ dabakar grahak chuniye.', { kind: 'copy' });
+    closeIfDone(state, rv, out);
+    return out;
+  }
+
+  // ---------------------------------------------- do-taraf khata: the customer checks every entry
+  // Each new entry, and the monthly statement, reaches the customer with "Haan, sahi hai" / "Galat hai".
+  // Haan puts a ✓ in the owner's khata. Galat goes into the owner's evening ✅/❌ batch, like a disputed cash claim.
+  const typeHi = (t) => (t.type === 'credit' ? 'udhaar' : 'jama');
+  function notifyEntries(state, out, txns) {
+    for (const t of txns) {
+      const c = getCust(state, t.custId);
+      if (!c || !c.phone || t.voided || t.note === 'seed' || t.source === 'upi' || t.via === 'customer') continue;
+      const bal = balance(state, c.id);
+      emit(state, out, c.id, '📒 ' + state.shop.name + ': aapke khate mein ' + fmtDate(t.date) + ' ko ' + rupees(t.amount) + ' ' + typeHi(t) +
+        (t.items ? ' (' + t.items + ')' : '') + ' likha gaya.\nKul baaki: ' + rupees(Math.max(0, bal)) + '\nSahi hai?', { kind: 'entry-check', txnId: t.id });
+    }
+  }
+  function sendStatements(state) {
+    const out = [];
+    const month = MONTHS[+state.today.slice(5, 7) - 1] + ' ' + state.today.slice(0, 4);
+    let n = 0;
+    for (const c of state.customers) {
+      const bal = Math.round(balance(state, c.id));
+      if (!c.phone || bal <= 0) continue;
+      const recent = state.txns.filter((t) => t.custId === c.id && !t.voided).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).slice(-4).map((t) => '  ' + fmtDate(t.date) + ': ' + rupees(t.amount) + ' ' + typeHi(t)).join('\n');
+      emit(state, out, c.id, '📄 ' + state.shop.name + ' · ' + month + ' ka hisaab\nAapke naam: ' + rupees(bal) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: bal });
+      n++;
+    }
+    emit(state, out, 'owner', n ? '📄 ' + n + ' grahakon ko mahine ka hisaab bheja. Jo "Haan" kahenge, unke khate mein ✓ lagega; jo "Galat" kahenge, woh shaam ke ✅/❌ mein aayenge.' : 'Kisi ka baaki nahi, hisaab bhejne ki zaroorat nahi.', { kind: 'statement-sent' });
+    log(state, 'statement', 'monthly statement sent to ' + n);
+    return out;
+  }
+  function answerCheck(state, custId, msgId, ok) {
+    const out = [];
+    const c = getCust(state, custId);
+    const m = state.messages.find((x) => x.id === msgId && x.to === custId && (x.kind === 'entry-check' || x.kind === 'statement'));
+    if (!c || !m || m.answer) return out;
+    m.answer = ok ? 'ok' : 'wrong';
+    const t = m.txnId && state.txns.find((x) => x.id === m.txnId);
+    if (m.kind === 'entry-check' && (!t || t.voided)) { m.answer = 'gone'; return out; }
+    const label = m.kind === 'statement' ? rupees(m.balance) + ' ka mahine ka hisaab' : rupees(t.amount) + ' ' + typeHi(t) + ' (' + fmtDate(t.date) + ')';
+    if (ok) {
+      if (t) t.custOk = state.today; else c.statementOk = { date: state.today, balance: m.balance };
+      emit(state, out, c.id, 'Dhanyavaad 🙏 Aapne ' + label + ' sahi bataya.', { kind: 'check-ok' });
+      log(state, 'check', c.name + ' confirmed ' + label);
+      return out;
+    }
+    const k = { id: nextId(state, 'K'), custId: c.id, type: 'check', origin: 'customer-check', what: m.kind === 'statement' ? 'statement' : 'entry', txnId: t ? t.id : null,
+      amount: t ? t.amount : m.balance, label, date: state.today, status: 'pending' };
+    claims(state).push(k);
+    if (t) t.custWrong = state.today;
+    emit(state, out, c.id, 'Theek hai, ' + label + ' par aapka sawaal dukaandaar ko bhej diya. Woh aaj shaam dekhkar theek karenge.', { kind: 'check-wrong' });
+    emit(state, out, 'owner', '⚠️ ' + c.name + ' ne ' + label + ' ko galat bataya. Shaam ke hisaab mein ✅/❌ se tay kijiye.', { kind: 'check' });
+    log(state, 'check', c.name + ' disputed ' + label);
+    return out;
+  }
+  // The owner settles a customer's "galat hai": ✅ keeps the entry, ❌ admits the mistake (an entry is removed).
+  function resolveCheck(state, k, c, ok, out) {
+    const t = k.txnId && state.txns.find((x) => x.id === k.txnId);
+    if (ok) {
+      k.status = 'kept';
+      emit(state, out, 'owner', '👍 ' + c.name + ' ka ' + k.label + ' jaisa likha hai waisa rahega. Unse ek baar baat kar lijiye.', { kind: 'cash-done' });
+      if (c.phone) emit(state, out, c.id, c.name + ' 🙏 dukaandaar ke hisaab se ' + k.label + ' sahi hai. Dukaan par ek baar baat kar lijiye.', { kind: 'dispute' });
+    } else {
+      k.status = 'fixed';
+      if (t && !t.voided) { t.voided = true; t.voidReason = 'customer ne galat bataya, dukaandaar ne maana'; }
+      const bal = balance(state, c.id);
+      if (bal <= 0) { c.dueDate = null; c.reminderLevel = 0; }
+      emit(state, out, 'owner', '✅ Galti theek ki: ' + c.name + (t ? ' ki ' + k.label + ' wali entry hata di.' : ' ka hisaab dobara dekhna hai.') + ' Baaki: ' + rupees(Math.max(0, bal)), { kind: 'cash-done' });
+      if (c.phone) emit(state, out, c.id, 'Maafi 🙏 ' + (t ? k.label + ' wali entry hata di gayi.' : 'hisaab dobara dekh rahe hain.') + ' Abhi baaki: ' + rupees(Math.max(0, bal)) + '\n- ' + state.shop.name, { kind: 'receipt' });
+    }
+    log(state, 'check', c.name + ' check ' + k.status);
+    return out;
+  }
+  /** Open "galat hai" questions for a customer (shown in the baaki list). */
+  const openChecks = (state, custId) => claims(state).filter((k) => k.type === 'check' && k.status === 'pending' && k.custId === custId).length;
+
   // ---------- one entry point for every user action (used by the web page and by the per-shop server) ----------
-  const ACTIONS = ['owner', 'upi', 'customer', 'confirm', 'galla', 'closeDay', 'nextDay', 'consentRequest', 'consentAnswer', 'consentRevoke'];
+  const ACTIONS = ['owner', 'upi', 'customer', 'confirm', 'galla', 'closeDay', 'nextDay', 'consentRequest', 'consentAnswer', 'consentRevoke', 'copyRead', 'copyDecide', 'copyConfirmAll', 'statements', 'customerCheck'];
   const looksLikeUpiSms = (t) => /(credited|received|recd)/i.test(t) && /(rs\.?|inr|₹)\s*[\d,]+/i.test(t);
   /** A fresh demo shop with its welcome message. */
   function freshShop(which, today) {
     const state = seedDemo(createState({ today }), which);
     const first = String(state.shop.owner || '').split(' ')[0] || 'Malik';
-    state.messages.push({ id: 'W1', to: 'owner', from: 'agent', text: 'Namaste ' + first + ' ji 🙏 Main ' + state.shop.name + ' ka Udhaar Agent hoon.\nKisi ne udhaar liya ho ya paisa jama kiya ho, bas voice note bhejiye. Reminder aur UPI ka hisaab main khud sambhal lunga.', date: state.today, ts: Date.now() });
+    const intro = state.customers.length
+      ? 'Bas boliye ya likhiye, jaise "Sharma ji ne 340 ka saaman liya, kal denge". Main khata likhunga, grahak se WhatsApp par "sahi hai?" puchunga, aur reminder aur cash/UPI ka hisaab khud sambhal lunga.'
+      : 'Khata abhi khali hai. Har grahak ka baaki bolkar bataiye, jaise "Sharma ji ke 1240 baaki hain". (Experimental: Purani copy ke page ka 📷 photo bhi bhej sakte hain.)';
+    state.messages.push({ id: 'W1', to: 'owner', from: 'agent', text: 'Namaste ' + first + ' ji 🙏 Main ' + state.shop.name + ' ka Udhaar Agent hoon.\n' + intro, date: state.today, ts: Date.now() });
     return state;
   }
   /**
@@ -1143,7 +1394,19 @@
     else if (action === 'consentRequest') result = requestConsent(state, str(args.custId, 20));
     else if (action === 'consentAnswer') result = answerConsent(state, str(args.custId, 20), !!args.yes);
     else if (action === 'consentRevoke') result = revokeConsent(state, str(args.custId, 20));
+    else if (action === 'statements') result = sendStatements(state);
+    else if (action === 'customerCheck') result = answerCheck(state, str(args.custId, 20), str(args.msgId, 20), !!args.ok);
+    else if (action === 'copyRead') result = readCopy(state, args.reading, args.mode === 'setup' ? 'setup' : 'daily');
+    else if (action === 'copyDecide') result = decideCopyLine(state, str(args.lineId, 20), str(args.decision, 10), args.edit && typeof args.edit === 'object' ? args.edit : null);
+    else if (action === 'copyConfirmAll') result = confirmCopyAll(state, str(args.reviewId, 20));
     const t = state.txns.length > before ? state.txns[state.txns.length - 1] : null;
+    const added = state.txns.slice(before);
+    if (added.length) { const extra = []; notifyEntries(state, extra, added); if (Array.isArray(result)) result.push(...extra); else if (result && Array.isArray(result.messages)) result.messages.push(...extra); }
+    // the monthly statement goes out by itself on the 1st
+    if (action === 'nextDay' && state.today.slice(8) === '01' && state.statementFor !== state.today.slice(0, 7)) {
+      state.statementFor = state.today.slice(0, 7);
+      const st = sendStatements(state); if (Array.isArray(result)) result.push(...st);
+    }
     return { result, freshTxn: t ? t.id : null };
   }
 
@@ -1154,9 +1417,9 @@
     // ledger + scores
     balance, totalOutstanding, customerScore, consentOf, requestConsent, answerConsent, revokeConsent, lenderView, DEMO_LENDER, shopProfile, dashboard, DEMO_SHOPS, creditHistory, findCustomers, upiLink,
     // llm
-    llmRequestParts, intentFromLlm,
+    llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks,
     // utils
     transliterate, tokenize, addDays, daysBetween, fmtDate, fmtDay, rupees
   };

@@ -240,3 +240,179 @@ test('consent: nothing reaches the lender until the customer says yes, and it ca
   assert.ok(r.some((m) => m.to === 'owner' && /number nahi/.test(m.text)));
   assert.strictEqual(C.consentOf(s, 'C007').status, 'none');
 });
+
+test('copy photo, daily list: new lines proposed, lines already in the khata skipped, nothing written before ✅', () => {
+  const s = C.freshShop('gupta', TODAY);
+  C.runAction(s, 'owner', { text: 'Sharma ji ne 340 ka saaman liya, kal denge' });
+  const before = s.txns.length, out0 = C.totalOutstanding(s);
+  const reading = { format: 'daily_list', page_date: TODAY, language: 'hinglish', customer: '', lines: [
+    { name: 'Sharma ji', amount: 340, type: 'credit', date: '', items: 'saaman', raw: 'Sharma 340', sure: true },     // voice note already logged it
+    { name: 'पप्पू', amount: 50, type: 'credit', date: '', items: '', raw: 'पप्पू 50', sure: true },                 // Devanagari name
+    { name: 'Verma', amount: 300, type: 'payment', date: '', items: '', raw: 'Verma 300 jama', sure: true },
+    { name: 'Raju', amount: 80, type: 'credit', date: '', items: 'anda', raw: 'Raju 80', sure: false },               // not a customer yet
+    { name: 'Junk', amount: 0, type: 'credit', date: '', items: '', raw: '', sure: true },                          // dropped
+    { name: 'Future', amount: 10, type: 'credit', date: '2099-01-01', items: '', raw: '', sure: true }              // bad date becomes the page date
+  ] };
+  C.runAction(s, 'copyRead', { reading });
+  const rv = s.copyReviews[0];
+  assert.deepStrictEqual(rv.lines.map((l) => [l.name, l.status]), [['Sharma ji', 'already'], ['पप्पू', 'new'], ['Verma', 'new'], ['Raju', 'newcust'], ['Future', 'newcust']]);
+  assert.strictEqual(rv.lines[4].date, TODAY);
+  assert.strictEqual(s.txns.length, before, 'reading writes nothing');
+  assert.ok(s.messages.some((m) => m.kind === 'copy-review' && m.reviewId === rv.id));
+  // owner skips one line, edits Verma's amount, then "Sab sahi"
+  C.runAction(s, 'copyDecide', { lineId: rv.lines[4].id, decision: 'skip' });
+  C.runAction(s, 'copyDecide', { lineId: rv.lines[2].id, decision: 'edit', edit: { amount: 350 } });
+  C.runAction(s, 'copyConfirmAll', { reviewId: rv.id });
+  assert.strictEqual(rv.open, false);
+  assert.strictEqual(s.txns.length, before + 3);
+  assert.strictEqual(C.totalOutstanding(s), out0 + 50 - 350 + 80);
+  const raju = s.customers.find((c) => c.name === 'Raju');
+  assert.ok(raju && s.txns.some((t) => t.custId === raju.id && t.source === 'copy' && t.dueDate));
+  // the same photo again: everything written is already in the khata; Verma's 300 is new (the owner wrote 350)
+  C.runAction(s, 'copyRead', { reading });
+  const rv2 = s.copyReviews[1];
+  assert.deepStrictEqual(rv2.lines.map((l) => l.status), ['already', 'already', 'new', 'already', 'newcust']);
+});
+
+test('copy photo, one customer per page: old rows match the khata one to one; ambiguous names wait for a choice', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const meena = s.txns.filter((t) => t.custId === 'C002' && !t.voided).slice(-3);
+  const lines = meena.map((t) => ({ name: '', amount: t.amount, type: t.type, date: t.date, items: '', raw: '', sure: true }));
+  lines.push({ name: '', amount: meena[0].amount, type: meena[0].type, date: meena[0].date, items: '', raw: 'written twice', sure: true });
+  lines.push({ name: '', amount: 120, type: 'credit', date: TODAY, items: 'doodh', raw: '', sure: true });
+  C.runAction(s, 'copyRead', { reading: { format: 'per_customer', page_date: '', language: 'hindi', customer: 'Meena didi', lines } });
+  const rv = s.copyReviews[0];
+  assert.deepStrictEqual(rv.lines.map((l) => l.status), ['already', 'already', 'already', 'new', 'new']);
+  assert.ok(rv.lines.every((l) => l.custId === 'C002'));
+  // ✅ on an "already" line does nothing
+  const n = s.txns.length;
+  C.runAction(s, 'copyDecide', { lineId: rv.lines[0].id, decision: 'ok' });
+  assert.strictEqual(s.txns.length, n);
+  // two customers share a surname: the line waits until the owner picks one
+  for (const [id, name] of [['C098', 'Anil Rao'], ['C099', 'Sunil Rao']]) s.customers.push({ id, name, key: name.toLowerCase(), phone: null, vpas: [], dueDate: null, reminderLevel: 0 });
+  C.runAction(s, 'copyRead', { reading: { format: 'daily_list', page_date: TODAY, language: '', customer: '', lines: [{ name: 'Rao', amount: 60, type: 'credit', date: '', items: '', raw: '', sure: true }] } });
+  const rv2 = s.copyReviews[1];
+  assert.strictEqual(rv2.lines[0].status, 'ambiguous');
+  const m = s.txns.length;
+  C.runAction(s, 'copyConfirmAll', { reviewId: rv2.id });
+  assert.strictEqual(s.txns.length, m);
+  assert.strictEqual(rv2.open, true);
+  C.runAction(s, 'copyDecide', { lineId: rv2.lines[0].id, decision: 'edit', edit: { custId: 'C099' } });
+  C.runAction(s, 'copyDecide', { lineId: rv2.lines[0].id, decision: 'ok' });
+  assert.strictEqual(s.txns.length, m + 1);
+  assert.strictEqual(rv2.open, false);
+  // a photo that is not a khata page writes nothing and says so
+  const r = C.runAction(s, 'copyRead', { reading: { format: 'unclear', lines: [] } }).result;
+  assert.ok(r.some((x) => /samajh nahi aaya/.test(x.text)));
+});
+
+test('copy photo, first-day setup: opening balances fill an empty khata, and only differences are proposed later', () => {
+  const s = C.freshShop('nayi', TODAY);
+  assert.strictEqual(s.customers.length, 0);
+  assert.match(s.messages[0].text, /baaki bolkar/);
+  assert.match(s.messages[0].text, /Experimental/);
+  assert.match(C.copyReadRequest(s, 'setup'), /SETTING UP/);
+  assert.doesNotMatch(C.copyReadRequest(s, 'daily'), /SETTING UP/);
+  const page = { format: 'balance_list', page_date: '', language: 'marathi', customer: '', lines: [
+    { name: 'Sharma ji', amount: 1240, type: 'balance', date: '', items: '', raw: 'शर्मा जी 1240', sure: true },
+    { name: 'Meena didi', amount: 700, type: 'balance', date: '', items: '', raw: '', sure: true },
+    { name: 'Pappu', amount: 0, type: 'balance', date: '', items: '', raw: 'Pappu nil', sure: true }
+  ] };
+  C.runAction(s, 'copyRead', { reading: page, mode: 'setup' });
+  const rv = s.copyReviews[0];
+  assert.deepStrictEqual(rv.lines.map((l) => l.status), ['newcust', 'newcust', 'already']);
+  C.runAction(s, 'copyConfirmAll', { reviewId: rv.id });
+  assert.strictEqual(s.customers.length, 2);
+  assert.strictEqual(C.totalOutstanding(s), 1940);
+  const sharma = s.customers.find((c) => c.name === 'Sharma ji');
+  assert.ok(sharma.dueDate > s.today, 'no reminder fires for an old date');
+  // the next page repeats Sharma ji with a new total: only the 260 difference is proposed; Meena didi matches
+  page.lines[0].amount = 1500;
+  C.runAction(s, 'copyRead', { reading: page, mode: 'setup' });
+  const rv2 = s.copyReviews[1];
+  assert.deepStrictEqual(rv2.lines.map((l) => [l.status, l.adjust]), [['new', 260], ['already', 0], ['already', 0]]);
+  C.runAction(s, 'copyConfirmAll', { reviewId: rv2.id });
+  assert.strictEqual(C.balance(s, sharma.id), 1500);
+  // the same customer twice on one page is written once
+  C.runAction(s, 'copyRead', { reading: { format: 'balance_list', lines: [
+    { name: 'Raju', amount: 300, type: 'balance', date: '', items: '', raw: '', sure: true },
+    { name: 'Raju', amount: 300, type: 'balance', date: '', items: '', raw: '', sure: true }] } });
+  C.runAction(s, 'copyConfirmAll', { reviewId: s.copyReviews[2].id });
+  assert.strictEqual(C.balance(s, s.customers.find((c) => c.name === 'Raju').id), 300);
+});
+
+test('do-taraf khata: the customer confirms an entry with Haan, and the owner sees a tick', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const r = C.runAction(s, 'owner', { text: 'Sharma ji ne 340 ka saaman liya, kal denge' });
+  const ask = s.messages.find((m) => m.to === 'C001' && m.kind === 'entry-check');
+  assert.ok(ask && ask.txnId === r.freshTxn && /Sahi hai\?/.test(ask.text));
+  assert.ok(r.result.messages.includes(ask), 'the question is part of the action result');
+  C.runAction(s, 'customerCheck', { custId: 'C001', msgId: ask.id, ok: true });
+  const t = s.txns.find((x) => x.id === r.freshTxn);
+  assert.strictEqual(t.custOk, TODAY);
+  assert.strictEqual(ask.answer, 'ok');
+  // answering twice does nothing; another customer cannot answer it
+  const n = s.messages.length;
+  C.runAction(s, 'customerCheck', { custId: 'C001', msgId: ask.id, ok: false });
+  C.runAction(s, 'customerCheck', { custId: 'C002', msgId: ask.id, ok: false });
+  assert.strictEqual(s.messages.length, n);
+  // no WhatsApp number, UPI and the customer's own cash claim get no question
+  C.runAction(s, 'owner', { text: 'Rohan ne 50 ka liya' });
+  assert.ok(!s.messages.some((m) => m.to === 'C007' && m.kind === 'entry-check'));
+  C.runAction(s, 'customer', { custId: 'C002', text: 'Cash de diya' });
+  C.runAction(s, 'closeDay');
+  const k = s.cashClaims.find((x) => x.status === 'pending' && x.custId === 'C002');
+  C.runAction(s, 'confirm', { claimId: k.id, ok: true });
+  assert.ok(!s.messages.some((m) => m.to === 'C002' && m.kind === 'entry-check'));
+});
+
+test('do-taraf khata: Galat hai goes to the evening batch; the owner keeps the entry or fixes it', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const r1 = C.runAction(s, 'owner', { text: 'Sharma ji ne 340 ka saaman liya' });
+  const r2 = C.runAction(s, 'owner', { text: 'Verma ji ne 180 ka tel liya' });
+  const ask1 = s.messages.find((m) => m.kind === 'entry-check' && m.txnId === r1.freshTxn);
+  const ask2 = s.messages.find((m) => m.kind === 'entry-check' && m.txnId === r2.freshTxn);
+  const before = C.balance(s, 'C001');
+  C.runAction(s, 'customerCheck', { custId: 'C001', msgId: ask1.id, ok: false });
+  C.runAction(s, 'customerCheck', { custId: 'C005', msgId: ask2.id, ok: false });
+  assert.strictEqual(C.openChecks(s, 'C001'), 1);
+  assert.ok(s.messages.some((m) => m.to === 'owner' && m.kind === 'check' && /Sharma ji/.test(m.text)));
+  assert.strictEqual(C.balance(s, 'C001'), before, 'a question changes nothing by itself');
+  assert.strictEqual(C.dashboard(s).pendingCash, 0, 'not counted as cash');
+  const batch = C.runAction(s, 'closeDay').result.find((m) => m.kind === 'cash-confirm');
+  assert.strictEqual(batch.claimIds.length, 2);
+  assert.match(batch.text, /galat bataya/);
+  const [k1, k2] = batch.claimIds.map((id) => s.cashClaims.find((x) => x.id === id));
+  // ❌ = the owner admits the mistake: the entry is removed and the customer told
+  C.runAction(s, 'confirm', { claimId: k1.id, ok: false });
+  assert.strictEqual(C.balance(s, 'C001'), before - 340);
+  assert.ok(s.txns.find((t) => t.id === r1.freshTxn).voided);
+  assert.ok(s.messages.some((m) => m.to === 'C001' && /hata di gayi/.test(m.text)));
+  // ✅ = the entry stays; no score penalty for asking
+  const score = C.customerScore(s, 'C005').score;
+  C.runAction(s, 'confirm', { claimId: k2.id, ok: true });
+  assert.ok(!s.txns.find((t) => t.id === r2.freshTxn).voided);
+  assert.strictEqual(k2.status, 'kept');
+  assert.strictEqual(C.customerScore(s, 'C005').score, score);
+  assert.strictEqual(C.openChecks(s, 'C005'), 0);
+});
+
+test('do-taraf khata: monthly statement on the 1st, Haan ticks the balance, Galat goes to the batch', () => {
+  const s = C.freshShop('gupta', '2026-10-31');
+  const out = C.runAction(s, 'nextDay').result;
+  const st = out.filter((m) => m.kind === 'statement');
+  const owing = s.customers.filter((c) => c.phone && C.balance(s, c.id) > 0);
+  assert.strictEqual(st.length, owing.length);
+  assert.ok(st.every((m) => m.balance === Math.round(C.balance(s, m.to))));
+  assert.strictEqual(C.runAction(s, 'statements').result.filter((m) => m.kind === 'statement').length, owing.length, 'the owner can also send it by hand');
+  const a = st[0], b = st[1];
+  C.runAction(s, 'customerCheck', { custId: a.to, msgId: a.id, ok: true });
+  assert.deepStrictEqual(s.customers.find((c) => c.id === a.to).statementOk, { date: '2026-11-01', balance: a.balance });
+  C.runAction(s, 'customerCheck', { custId: b.to, msgId: b.id, ok: false });
+  const k = s.cashClaims.find((x) => x.type === 'check' && x.custId === b.to);
+  assert.strictEqual(k.what, 'statement');
+  C.runAction(s, 'confirm', { claimId: k.id, ok: false });
+  assert.strictEqual(k.status, 'fixed');
+  // the 2nd of the month sends nothing new
+  assert.strictEqual(C.runAction(s, 'nextDay').result.filter((m) => m.kind === 'statement').length, 0);
+});
