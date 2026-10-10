@@ -416,3 +416,23 @@ test('do-taraf khata: monthly statement on the 1st, Haan ticks the balance, Gala
   // the 2nd of the month sends nothing new
   assert.strictEqual(C.runAction(s, 'nextDay').result.filter((m) => m.kind === 'statement').length, 0);
 });
+
+test('do-taraf khata: no reply within 24 hours counts as accepted, and the customer can still say galat', () => {
+  const s = C.freshShop('gupta', TODAY);
+  C.runAction(s, 'owner', { text: 'Sharma ji ne 340 ka saaman liya, kal denge' });
+  const m1 = s.messages.filter((m) => m.kind === 'entry-check').pop();
+  assert.match(m1.text, /24 ghante/);
+  C.runAction(s, 'owner', { text: 'Sharma ji ne 90 ka doodh liya' });
+  const m2 = s.messages.filter((m) => m.kind === 'entry-check').pop();
+  C.runAction(s, 'customerCheck', { custId: m2.to, msgId: m2.id, ok: true });
+  assert.strictEqual(C.autoAccept(s).length, 0, 'same day: nothing auto-accepted');
+  C.runAction(s, 'nextDay', {});
+  const t1 = s.txns.find((t) => t.id === m1.txnId), t2 = s.txns.find((t) => t.id === m2.txnId);
+  assert.strictEqual(m1.answer, 'auto'); assert.ok(t1.custOk && t1.custAuto);
+  assert.strictEqual(m2.answer, 'ok'); assert.ok(t2.custOk && !t2.custAuto, 'a real haan stays a real haan');
+  C.runAction(s, 'customerCheck', { custId: m1.to, msgId: m1.id, ok: true });
+  assert.strictEqual(m1.answer, 'auto', 'haan after auto changes nothing');
+  C.runAction(s, 'customerCheck', { custId: m1.to, msgId: m1.id, ok: false });
+  assert.strictEqual(m1.answer, 'wrong'); assert.ok(!t1.custOk && t1.custWrong);
+  assert.strictEqual(C.openChecks(s, m1.to), 1);
+});

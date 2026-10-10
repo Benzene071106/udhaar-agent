@@ -189,6 +189,8 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
 .src { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .src span { font-size: .7rem; border: 1px solid var(--rule); border-radius: 6px; padding: 0 6px; color: var(--muted); white-space: nowrap; }
 .src span.ai { border-color: var(--agent); color: var(--agent); }
+.src span.chk { border-color: var(--payment); color: var(--payment); font-weight: 600; }
+.src span.chk.bad { border-color: var(--credit); color: var(--credit); }
 .foot { padding: 10px 22px 14px; font-size: .82rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
 .linkish { background: none; border: none; color: var(--ink); text-decoration: underline; padding: 0; font-size: .85rem; }
 .close { color: var(--ink); padding: 6px 12px; border-radius: 999px; }
@@ -516,7 +518,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     if (pc > 0) out.push(['due', 'Cash ' + C.rupees(pc) + ' confirm baaki']);
     if (c.disputed) out.push(['late', 'Vivaad']);
     if (C.openChecks(state, c.id) > 0) out.push(['late', 'Grahak: galat hai']);
-    else if (c.statementOk && c.statementOk.balance === b) out.push(['ok', '✓ Grahak ne maana']);
+    else if (c.statementOk && c.statementOk.balance === b) out.push(['ok', c.statementAuto ? '✓ Jawab nahi, maana gaya' : '✓ Grahak ne maana']);
     if (c.dueDate) {
       const d = C.daysBetween(state.today, c.dueDate);
       if (d > 1) out.push(['', 'Wada ' + C.fmtDate(c.dueDate)]);
@@ -625,6 +627,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
         : m.kind === 'entry-check' ? '<span class="kind">Nayi entry</span>\n' : m.kind === 'statement' ? '<span class="kind">Mahine ka hisaab</span>\n' : m.kind === 'check-ok' ? '<span class="kind">Dono ne maana ✓</span>\n' : m.kind === 'check-wrong' ? '<span class="kind l2">Sawaal bheja</span>\n' : '';
       const checkBtns = m.kind !== 'entry-check' && m.kind !== 'statement' ? ''
         : !m.answer ? '<div class="payrow"><button class="paybtn" type="button" data-check="' + m.id + '" data-ok="1">Haan, sahi hai</button><button class="paybtn" type="button" data-check="' + m.id + '" data-ok="0">Galat hai</button></div>'
+        : m.answer === 'auto' ? '<div class="payrow"><button class="paybtn" type="button" disabled>24 ghante: maana gaya</button><button class="paybtn" type="button" data-check="' + m.id + '" data-ok="0">Galat hai</button></div>'
         : '<button class="paybtn" type="button" disabled>' + (m.answer === 'ok' ? 'Aapne kaha: sahi hai ✓' : m.answer === 'wrong' ? 'Aapne kaha: galat hai' : 'Entry hata di gayi') + '</button>';
       const cs = C.consentOf(state, c.id).status;
       const consentBtns = m.kind === 'consent-ask' && cs === 'requested' && m === lastOfKind(msgs, 'consent-ask')
@@ -700,8 +703,8 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
         (t.matchedBy ? '<span class="ai">' + esc(t.matchedBy) + '</span>' : t.parser === 'llm' ? '<span class="ai">' + AI_NAME + '</span>' : t.source === 'upi' ? '' : '<span>rules</span>') +
         (t.source === 'cash' && t.via === 'voice' ? '<span>dukaandaar ne bola</span>' : '') +
         (t.via === 'galla' && !t.matchedBy ? '<span class="ai">Galla Mic</span>' : '') +
-        (t.custOk && !t.voided ? '<span class="ai" title="Grahak ne WhatsApp par maana">✓ grahak ne maana</span>' : '') +
-        (t.custWrong && !t.custOk ? '<span>grahak: galat</span>' : '') +
+        (t.custOk && !t.voided ? (t.custAuto ? '<span class="chk" title="Grahak ne 24 ghante mein kuch nahi kaha">✓ 24 ghante, jawab nahi</span>' : '<span class="chk" title="Grahak ne WhatsApp par maana">✓ grahak ne maana</span>') : '') +
+        (t.custWrong && !t.custOk ? '<span class="chk bad">⚠ grahak: galat hai</span>' : '') +
         (t.voided ? '<span>cancel</span>' : '');
       return '<tr class="' + (t.voided ? 'void ' : '') + (t.id === freshTxn ? 'fresh' : '') + '">' +
         '<td class="date">' + esc(C.fmtDate(t.date)) + '</td>' +

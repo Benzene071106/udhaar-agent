@@ -197,6 +197,8 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
 .src { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .src span { font-size: .7rem; border: 1px solid var(--rule); border-radius: 6px; padding: 0 6px; color: var(--muted); white-space: nowrap; }
 .src span.ai { border-color: var(--agent); color: var(--agent); }
+.src span.chk { border-color: var(--payment); color: var(--payment); font-weight: 600; }
+.src span.chk.bad { border-color: var(--credit); color: var(--credit); }
 .foot { padding: 10px 22px 14px; font-size: .82rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
 .linkish { background: none; border: none; color: var(--ink); text-decoration: underline; padding: 0; font-size: .85rem; }
 .close { color: var(--ink); padding: 6px 12px; border-radius: 999px; }
@@ -4052,7 +4054,7 @@ var qrcode = function() {
       if (!c || !c.phone || t.voided || t.note === 'seed' || t.source === 'upi' || t.via === 'customer') continue;
       const bal = balance(state, c.id);
       emit(state, out, c.id, '📒 ' + state.shop.name + ': aapke khate mein ' + fmtDate(t.date) + ' ko ' + rupees(t.amount) + ' ' + typeHi(t) +
-        (t.items ? ' (' + t.items + ')' : '') + ' likha gaya.\nKul baaki: ' + rupees(Math.max(0, bal)) + '\nSahi hai?', { kind: 'entry-check', txnId: t.id });
+        (t.items ? ' (' + t.items + ')' : '') + ' likha gaya.\nKul baaki: ' + rupees(Math.max(0, bal)) + '\nSahi hai? (24 ghante mein jawab na aaye toh sahi maana jayega)', { kind: 'entry-check', txnId: t.id });
     }
   }
   function sendStatements(state) {
@@ -4063,7 +4065,7 @@ var qrcode = function() {
       const bal = Math.round(balance(state, c.id));
       if (!c.phone || bal <= 0) continue;
       const recent = state.txns.filter((t) => t.custId === c.id && !t.voided).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).slice(-4).map((t) => '  ' + fmtDate(t.date) + ': ' + rupees(t.amount) + ' ' + typeHi(t)).join('\n');
-      emit(state, out, c.id, '📄 ' + state.shop.name + ' · ' + month + ' ka hisaab\nAapke naam: ' + rupees(bal) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: bal });
+      emit(state, out, c.id, '📄 ' + state.shop.name + ' · ' + month + ' ka hisaab\nAapke naam: ' + rupees(bal) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai? (24 ghante mein jawab na aaye toh sahi maana jayega)', { kind: 'statement', balance: bal });
       n++;
     }
     emit(state, out, 'owner', n ? '📄 ' + n + ' grahakon ko mahine ka hisaab bheja. Jo "Haan" kahenge, unke khate mein ✓ lagega; jo "Galat" kahenge, woh shaam ke ✅/❌ mein aayenge.' : 'Kisi ka baaki nahi, hisaab bhejne ki zaroorat nahi.', { kind: 'statement-sent' });
@@ -4074,11 +4076,13 @@ var qrcode = function() {
     const out = [];
     const c = getCust(state, custId);
     const m = state.messages.find((x) => x.id === msgId && x.to === custId && (x.kind === 'entry-check' || x.kind === 'statement'));
-    if (!c || !m || m.answer) return out;
+    // after 24 hours of silence the entry counts as accepted, but the customer can still say "galat hai"
+    if (!c || !m || (m.answer && !(m.answer === 'auto' && !ok))) return out;
     m.answer = ok ? 'ok' : 'wrong';
     const t = m.txnId && state.txns.find((x) => x.id === m.txnId);
     if (m.kind === 'entry-check' && (!t || t.voided)) { m.answer = 'gone'; return out; }
     const label = m.kind === 'statement' ? rupees(m.balance) + ' ka mahine ka hisaab' : rupees(t.amount) + ' ' + typeHi(t) + ' (' + fmtDate(t.date) + ')';
+    if (t) delete t.custAuto; else delete c.statementAuto;
     if (ok) {
       if (t) t.custOk = state.today; else c.statementOk = { date: state.today, balance: m.balance };
       emit(state, out, c.id, 'Dhanyavaad 🙏 Aapne ' + label + ' sahi bataya.', { kind: 'check-ok' });
@@ -4088,7 +4092,7 @@ var qrcode = function() {
     const k = { id: nextId(state, 'K'), custId: c.id, type: 'check', origin: 'customer-check', what: m.kind === 'statement' ? 'statement' : 'entry', txnId: t ? t.id : null,
       amount: t ? t.amount : m.balance, label, date: state.today, status: 'pending' };
     claims(state).push(k);
-    if (t) t.custWrong = state.today;
+    if (t) { t.custWrong = state.today; delete t.custOk; } else delete c.statementOk;
     emit(state, out, c.id, 'Theek hai, ' + label + ' par aapka sawaal dukaandaar ko bhej diya. Woh aaj shaam dekhkar theek karenge.', { kind: 'check-wrong' });
     emit(state, out, 'owner', '⚠️ ' + c.name + ' ne ' + label + ' ko galat bataya. Shaam ke hisaab mein ✅/❌ se tay kijiye.', { kind: 'check' });
     log(state, 'check', c.name + ' disputed ' + label);
@@ -4113,6 +4117,21 @@ var qrcode = function() {
     return out;
   }
   /** Open "galat hai" questions for a customer (shown in the baaki list). */
+  // No reply within 24 hours (by the next day) counts as accepted: marked separately from a real "haan".
+  function autoAccept(state) {
+    const out = [];
+    for (const m of state.messages) {
+      if ((m.kind !== 'entry-check' && m.kind !== 'statement') || m.answer || daysBetween(m.date, state.today) < 1) continue;
+      const c = getCust(state, m.to); if (!c) continue;
+      const t = m.txnId && state.txns.find((x) => x.id === m.txnId);
+      if (m.kind === 'entry-check' && (!t || t.voided)) { m.answer = 'gone'; continue; }
+      m.answer = 'auto';
+      if (t) { t.custOk = state.today; t.custAuto = true; } else { c.statementOk = { date: state.today, balance: m.balance }; c.statementAuto = true; }
+      out.push(c.name);
+    }
+    if (out.length) log(state, 'check', '24h no reply, accepted: ' + out.join(', '));
+    return out;
+  }
   const openChecks = (state, custId) => claims(state).filter((k) => k.type === 'check' && k.status === 'pending' && k.custId === custId).length;
 
   // ---------- one entry point for every user action (used by the web page and by the per-shop server) ----------
@@ -4156,7 +4175,7 @@ var qrcode = function() {
     } else if (action === 'confirm') result = confirmCash(state, str(args.claimId, 40), !!args.ok);
     else if (action === 'galla') result = scanCounterSpeech(state, str(args.text));
     else if (action === 'closeDay') result = runEveningSummary(state);
-    else if (action === 'nextDay') result = advanceDay(state);
+    else if (action === 'nextDay') { result = advanceDay(state); autoAccept(state); }
     else if (action === 'consentRequest') result = requestConsent(state, str(args.custId, 20));
     else if (action === 'consentAnswer') result = answerConsent(state, str(args.custId, 20), !!args.yes);
     else if (action === 'consentRevoke') result = revokeConsent(state, str(args.custId, 20));
@@ -4185,7 +4204,7 @@ var qrcode = function() {
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
     // utils
     transliterate, tokenize, addDays, daysBetween, fmtDate, fmtDay, rupees
   };
@@ -4248,7 +4267,7 @@ var qrcode = function() {
     if (pc > 0) out.push(['due', 'Cash ' + C.rupees(pc) + ' confirm baaki']);
     if (c.disputed) out.push(['late', 'Vivaad']);
     if (C.openChecks(state, c.id) > 0) out.push(['late', 'Grahak: galat hai']);
-    else if (c.statementOk && c.statementOk.balance === b) out.push(['ok', '✓ Grahak ne maana']);
+    else if (c.statementOk && c.statementOk.balance === b) out.push(['ok', c.statementAuto ? '✓ Jawab nahi, maana gaya' : '✓ Grahak ne maana']);
     if (c.dueDate) {
       const d = C.daysBetween(state.today, c.dueDate);
       if (d > 1) out.push(['', 'Wada ' + C.fmtDate(c.dueDate)]);
@@ -4357,6 +4376,7 @@ var qrcode = function() {
         : m.kind === 'entry-check' ? '<span class="kind">Nayi entry</span>\n' : m.kind === 'statement' ? '<span class="kind">Mahine ka hisaab</span>\n' : m.kind === 'check-ok' ? '<span class="kind">Dono ne maana ✓</span>\n' : m.kind === 'check-wrong' ? '<span class="kind l2">Sawaal bheja</span>\n' : '';
       const checkBtns = m.kind !== 'entry-check' && m.kind !== 'statement' ? ''
         : !m.answer ? '<div class="payrow"><button class="paybtn" type="button" data-check="' + m.id + '" data-ok="1">Haan, sahi hai</button><button class="paybtn" type="button" data-check="' + m.id + '" data-ok="0">Galat hai</button></div>'
+        : m.answer === 'auto' ? '<div class="payrow"><button class="paybtn" type="button" disabled>24 ghante: maana gaya</button><button class="paybtn" type="button" data-check="' + m.id + '" data-ok="0">Galat hai</button></div>'
         : '<button class="paybtn" type="button" disabled>' + (m.answer === 'ok' ? 'Aapne kaha: sahi hai ✓' : m.answer === 'wrong' ? 'Aapne kaha: galat hai' : 'Entry hata di gayi') + '</button>';
       const cs = C.consentOf(state, c.id).status;
       const consentBtns = m.kind === 'consent-ask' && cs === 'requested' && m === lastOfKind(msgs, 'consent-ask')
@@ -4432,8 +4452,8 @@ var qrcode = function() {
         (t.matchedBy ? '<span class="ai">' + esc(t.matchedBy) + '</span>' : t.parser === 'llm' ? '<span class="ai">' + AI_NAME + '</span>' : t.source === 'upi' ? '' : '<span>rules</span>') +
         (t.source === 'cash' && t.via === 'voice' ? '<span>dukaandaar ne bola</span>' : '') +
         (t.via === 'galla' && !t.matchedBy ? '<span class="ai">Galla Mic</span>' : '') +
-        (t.custOk && !t.voided ? '<span class="ai" title="Grahak ne WhatsApp par maana">✓ grahak ne maana</span>' : '') +
-        (t.custWrong && !t.custOk ? '<span>grahak: galat</span>' : '') +
+        (t.custOk && !t.voided ? (t.custAuto ? '<span class="chk" title="Grahak ne 24 ghante mein kuch nahi kaha">✓ 24 ghante, jawab nahi</span>' : '<span class="chk" title="Grahak ne WhatsApp par maana">✓ grahak ne maana</span>') : '') +
+        (t.custWrong && !t.custOk ? '<span class="chk bad">⚠ grahak: galat hai</span>' : '') +
         (t.voided ? '<span>cancel</span>' : '');
       return '<tr class="' + (t.voided ? 'void ' : '') + (t.id === freshTxn ? 'fresh' : '') + '">' +
         '<td class="date">' + esc(C.fmtDate(t.date)) + '</td>' +

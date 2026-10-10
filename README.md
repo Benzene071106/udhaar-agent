@@ -21,7 +21,7 @@ Opened as a file, the demo keeps each shop's state in the browser's local storag
 ## Do-taraf khata (customer confirms on WhatsApp)
 
 - **Every new entry** (udhaar, or jama the owner reports) goes to the customer with **Haan, sahi hai** and **Galat hai**. Entries the customer reported themselves, UPI payments, old entries and customers without a number are not asked.
-- **Haan** puts **✓ grahak ne maana** on that row of the owner's khata.
+- **Haan** puts **✓ grahak ne maana** on that row of the owner's khata. **No reply within 24 hours** (by the next day) counts as accepted and shows as **✓ 24 ghante, jawab nahi**, kept separate from a real haan; the customer can still tap **Galat hai** after that.
 - **Galat hai** goes into the owner's evening batch next to the cash claims. ✅ means the entry stays (the customer is told to talk at the shop); ❌ means it was a mistake, and the entry is removed with an apology to the customer. Neither one counts as a dispute in the credit score.
 - **Monthly statement:** on the 1st of each month (or the **📄 Mahine ka hisaab** button) every customer with a balance gets their total and last entries, with the same two buttons. Haan shows **✓ Grahak ne maana** in the baaki list while the balance is unchanged.
 
@@ -226,9 +226,9 @@ Edit `core/`, `web/` or `server/`, then rebuild. Never edit `dist/` by hand.
 node --test test/core.test.js test/server.test.js
 ```
 
-There are 34 tests:
+There are 35 tests:
 
-- **Core (24):** do-taraf khata (Haan sets ✓, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
+- **Core (25):** do-taraf khata (Haan sets ✓, no reply in 24 hours counts as accepted but galat still works, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
 - **Server (10):**
   - each shop keeps its own khata file and it survives a restart
   - the page is served with the shop config

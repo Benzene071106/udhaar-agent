@@ -1286,7 +1286,7 @@
       if (!c || !c.phone || t.voided || t.note === 'seed' || t.source === 'upi' || t.via === 'customer') continue;
       const bal = balance(state, c.id);
       emit(state, out, c.id, '📒 ' + state.shop.name + ': aapke khate mein ' + fmtDate(t.date) + ' ko ' + rupees(t.amount) + ' ' + typeHi(t) +
-        (t.items ? ' (' + t.items + ')' : '') + ' likha gaya.\nKul baaki: ' + rupees(Math.max(0, bal)) + '\nSahi hai?', { kind: 'entry-check', txnId: t.id });
+        (t.items ? ' (' + t.items + ')' : '') + ' likha gaya.\nKul baaki: ' + rupees(Math.max(0, bal)) + '\nSahi hai? (24 ghante mein jawab na aaye toh sahi maana jayega)', { kind: 'entry-check', txnId: t.id });
     }
   }
   function sendStatements(state) {
@@ -1297,7 +1297,7 @@
       const bal = Math.round(balance(state, c.id));
       if (!c.phone || bal <= 0) continue;
       const recent = state.txns.filter((t) => t.custId === c.id && !t.voided).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).slice(-4).map((t) => '  ' + fmtDate(t.date) + ': ' + rupees(t.amount) + ' ' + typeHi(t)).join('\n');
-      emit(state, out, c.id, '📄 ' + state.shop.name + ' · ' + month + ' ka hisaab\nAapke naam: ' + rupees(bal) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: bal });
+      emit(state, out, c.id, '📄 ' + state.shop.name + ' · ' + month + ' ka hisaab\nAapke naam: ' + rupees(bal) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai? (24 ghante mein jawab na aaye toh sahi maana jayega)', { kind: 'statement', balance: bal });
       n++;
     }
     emit(state, out, 'owner', n ? '📄 ' + n + ' grahakon ko mahine ka hisaab bheja. Jo "Haan" kahenge, unke khate mein ✓ lagega; jo "Galat" kahenge, woh shaam ke ✅/❌ mein aayenge.' : 'Kisi ka baaki nahi, hisaab bhejne ki zaroorat nahi.', { kind: 'statement-sent' });
@@ -1308,11 +1308,13 @@
     const out = [];
     const c = getCust(state, custId);
     const m = state.messages.find((x) => x.id === msgId && x.to === custId && (x.kind === 'entry-check' || x.kind === 'statement'));
-    if (!c || !m || m.answer) return out;
+    // after 24 hours of silence the entry counts as accepted, but the customer can still say "galat hai"
+    if (!c || !m || (m.answer && !(m.answer === 'auto' && !ok))) return out;
     m.answer = ok ? 'ok' : 'wrong';
     const t = m.txnId && state.txns.find((x) => x.id === m.txnId);
     if (m.kind === 'entry-check' && (!t || t.voided)) { m.answer = 'gone'; return out; }
     const label = m.kind === 'statement' ? rupees(m.balance) + ' ka mahine ka hisaab' : rupees(t.amount) + ' ' + typeHi(t) + ' (' + fmtDate(t.date) + ')';
+    if (t) delete t.custAuto; else delete c.statementAuto;
     if (ok) {
       if (t) t.custOk = state.today; else c.statementOk = { date: state.today, balance: m.balance };
       emit(state, out, c.id, 'Dhanyavaad 🙏 Aapne ' + label + ' sahi bataya.', { kind: 'check-ok' });
@@ -1322,7 +1324,7 @@
     const k = { id: nextId(state, 'K'), custId: c.id, type: 'check', origin: 'customer-check', what: m.kind === 'statement' ? 'statement' : 'entry', txnId: t ? t.id : null,
       amount: t ? t.amount : m.balance, label, date: state.today, status: 'pending' };
     claims(state).push(k);
-    if (t) t.custWrong = state.today;
+    if (t) { t.custWrong = state.today; delete t.custOk; } else delete c.statementOk;
     emit(state, out, c.id, 'Theek hai, ' + label + ' par aapka sawaal dukaandaar ko bhej diya. Woh aaj shaam dekhkar theek karenge.', { kind: 'check-wrong' });
     emit(state, out, 'owner', '⚠️ ' + c.name + ' ne ' + label + ' ko galat bataya. Shaam ke hisaab mein ✅/❌ se tay kijiye.', { kind: 'check' });
     log(state, 'check', c.name + ' disputed ' + label);
@@ -1347,6 +1349,21 @@
     return out;
   }
   /** Open "galat hai" questions for a customer (shown in the baaki list). */
+  // No reply within 24 hours (by the next day) counts as accepted: marked separately from a real "haan".
+  function autoAccept(state) {
+    const out = [];
+    for (const m of state.messages) {
+      if ((m.kind !== 'entry-check' && m.kind !== 'statement') || m.answer || daysBetween(m.date, state.today) < 1) continue;
+      const c = getCust(state, m.to); if (!c) continue;
+      const t = m.txnId && state.txns.find((x) => x.id === m.txnId);
+      if (m.kind === 'entry-check' && (!t || t.voided)) { m.answer = 'gone'; continue; }
+      m.answer = 'auto';
+      if (t) { t.custOk = state.today; t.custAuto = true; } else { c.statementOk = { date: state.today, balance: m.balance }; c.statementAuto = true; }
+      out.push(c.name);
+    }
+    if (out.length) log(state, 'check', '24h no reply, accepted: ' + out.join(', '));
+    return out;
+  }
   const openChecks = (state, custId) => claims(state).filter((k) => k.type === 'check' && k.status === 'pending' && k.custId === custId).length;
 
   // ---------- one entry point for every user action (used by the web page and by the per-shop server) ----------
@@ -1390,7 +1407,7 @@
     } else if (action === 'confirm') result = confirmCash(state, str(args.claimId, 40), !!args.ok);
     else if (action === 'galla') result = scanCounterSpeech(state, str(args.text));
     else if (action === 'closeDay') result = runEveningSummary(state);
-    else if (action === 'nextDay') result = advanceDay(state);
+    else if (action === 'nextDay') { result = advanceDay(state); autoAccept(state); }
     else if (action === 'consentRequest') result = requestConsent(state, str(args.custId, 20));
     else if (action === 'consentAnswer') result = answerConsent(state, str(args.custId, 20), !!args.yes);
     else if (action === 'consentRevoke') result = revokeConsent(state, str(args.custId, 20));
@@ -1419,7 +1436,7 @@
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
     // utils
     transliterate, tokenize, addDays, daysBetween, fmtDate, fmtDay, rupees
   };
