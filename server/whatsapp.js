@@ -47,7 +47,12 @@ function createWhatsapp(o) {
 
   // ---------------------------------------------------------------- outbound
   let outQueue = Promise.resolve();
+  // While a webhook is being answered, text for the person who wrote is collected and returned in the webhook's
+  // TwiML reply instead of the Messages API: the Sandbox accepts a reply to an inbound message without a template
+  // (the API answers 21654 "ContentSid Required" for Sandbox senders on newer accounts).
+  let capture = null;
   function sendNow(to, body, mediaUrl) {
+    if (capture && capture.open && to === capture.to && body && !mediaUrl) { capture.msgs.push(String(body).slice(0, 1590)); stats.sent++; return Promise.resolve(); }
     if (!stats.sending || !to) return Promise.resolve();
     const form = new URLSearchParams({ From: sender, To: 'whatsapp:+' + to });
     if (body) form.set('Body', String(body).slice(0, 1590));
@@ -271,7 +276,24 @@ function createWhatsapp(o) {
       (env.WA_JOIN_CODE ? '<p class="note">Jud jaane ke baad ek "hi" bhejiye. Aap is dukaan ke grahak ban jayenge.</p>' : '') + '<p class="note">' + esc(link) + '</p>');
   }
 
-  return { stats, verify, handle, deliver, payPage, joinPage, getMedia, idle: () => outQueue };
+  /**
+   * Handle one inbound message and return the texts meant for its sender, for the TwiML reply. After `waitMs` the
+   * webhook has to answer; anything for the sender after that goes out through the Messages API as usual.
+   */
+  function handleForReply(params, act, getState, save, waitMs) {
+    const c = { to: digits(params.From), msgs: [], open: true };
+    capture = c;
+    const done = handle(params, act, getState, save).then(() => outQueue);
+    let timer;
+    const timeout = new Promise((r) => { timer = setTimeout(r, waitMs || 12000); });
+    const replied = Promise.race([done, timeout]).then(() => { clearTimeout(timer); c.open = false; if (capture === c) capture = null; return c.msgs.slice(); });
+    return { replied, done };
+  }
+  function twiml(msgs) {
+    return '<?xml version="1.0" encoding="UTF-8"?><Response>' + msgs.map((m) => '<Message>' + esc(m) + '</Message>').join('') + '</Response>';
+  }
+
+  return { stats, verify, handle, handleForReply, twiml, deliver, payPage, joinPage, getMedia, idle: () => outQueue };
 }
 
 module.exports = { createWhatsapp, twilioSignature, phone10 };

@@ -16,6 +16,7 @@
 //   TWILIO_*, OWNER_WHATSAPP, PUBLIC_URL, STT_*   real WhatsApp and voice notes: see server/whatsapp.js
 //   ACT_LIMIT_PER_MIN      default 30: /api/act calls per minute per visitor IP (the public demo URL is open to anyone)
 //   PHOTO_LIMIT_PER_10MIN  default 5: /api/photo calls per 10 minutes per visitor IP (each one is an AI vision call)
+//   WA_REPLY_TWIML         1 = answer the WhatsApp sender inside the webhook reply (TwiML) instead of the Messages API
 //   UDHAAR_ENV_FILE        optional KEY=value file read once at startup (default /home/node/udhaar.env).
 //                          Agent37 cannot pass env vars to an instance, so keys go in this file instead.
 //                          A variable already set in the real environment wins over the file.
@@ -218,10 +219,19 @@ function createServer(opts) {
         const params = Object.fromEntries(new URLSearchParams(raw));
         if (!wa.verify(req, params)) { console.log('whatsapp webhook: bad signature (url ' + (req.headers['x-forwarded-proto'] || '') + '://' + req.headers.host + req.url + ')'); return send(res, 403, { error: 'bad signature' }); }
         console.log('whatsapp webhook: message ' + String(params.MessageSid || '').slice(0, 8) + '… accepted');
-        // Answer Twilio at once; replies go out through the API, so a slow voice note never times the webhook out.
-        send(res, 200, '<?xml version="1.0" encoding="UTF-8"?><Response></Response>', 'text/xml');
-        serial(() => wa.handle(params, act, () => state, save)).then(() => save(), (e) => { wa.stats.lastError = String(e.message || e).slice(0, 200); });
-        return;
+        if (env.WA_REPLY_TWIML !== '1') {
+          // Answer Twilio at once; replies go out through the API, so a slow voice note never times the webhook out.
+          send(res, 200, wa.twiml([]), 'text/xml');
+          serial(() => wa.handle(params, act, () => state, save)).then(() => save(), (e) => { wa.stats.lastError = String(e.message || e).slice(0, 200); });
+          return;
+        }
+        // WA_REPLY_TWIML=1 (Sandbox on newer accounts): the sender's answer goes back in this webhook's TwiML (Twilio
+        // waits 15 s); messages for anyone else, and anything later than 12 s, go out through the Messages API.
+        let reply = Promise.resolve([]);
+        const job = serial(() => { const h = wa.handleForReply(params, act, () => state, save, +env.WA_REPLY_WAIT_MS || 12000); reply = h.replied; return h.done; });
+        job.then(() => save(), (e) => { wa.stats.lastError = String(e.message || e).slice(0, 200); });
+        const msgs = await Promise.race([job.then(() => reply, () => reply), new Promise((r) => setTimeout(r, (+env.WA_REPLY_WAIT_MS || 12000) + 500)).then(() => reply)]);
+        return send(res, 200, wa.twiml(msgs), 'text/xml');
       }
       if (req.method === 'GET' && url.pathname.startsWith('/pay/')) {
         const html = wa.payPage(state, decodeURIComponent(url.pathname.slice(5)));

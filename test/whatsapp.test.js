@@ -253,3 +253,20 @@ test('with ElevenLabs on, the customer also gets the bill as a Hindi voice note 
     assert.match(s2.server.whatsapp.stats.lastError, /ElevenLabs HTTP 401/);
   } finally { s2.server.close(); }
 });
+
+test('WA_REPLY_TWIML=1: the sender gets the answer inside the webhook reply, others still through the API', async () => {
+  const { server, fetch: tw } = waServer({ WA_REPLY_TWIML: '1' });
+  const base = await listen(server);
+  try {
+    const r = await inbound(base, server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type'), /text\/xml/);
+    const xml = await r.text();
+    assert.match(xml, /^<\?xml[^>]*><Response><Message>Namaste Rohit 🙏 Aap .* khate se jud gaye/);
+    assert.deepEqual(tw.to(JUDGE), [], 'the sender is not also messaged through the API');
+    assert.match(tw.to(OWNER)[0], /Rohit WhatsApp par jud gaye/);
+    const o = await inbound(base, server, { From: from(OWNER), Body: 'Rohit ne 340 ka saaman liya, kal denge' });
+    assert.match(await o.text(), /<Message>[^<]*340/);
+    assert.equal(server.getState().customers.find((c) => c.name === 'Rohit').phone, JUDGE.slice(-10));
+  } finally { server.close(); }
+});
