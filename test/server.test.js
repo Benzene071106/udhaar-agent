@@ -241,3 +241,14 @@ test('loadEnvFile fills unset variables from a KEY=value file and never override
   assert.deepStrictEqual(set.sort(), ['EMPTY_ONE', 'OWNER_WHATSAPP', 'STT_URL', 'TWILIO_ACCOUNT_SID']);
   assert.deepStrictEqual(loadEnvFile(path.join(tmpDir(), 'missing.env'), {}), []);
 });
+
+test('public visitors are rate limited on /api/act; local calls are not', async () => {
+  const srv = createServer({ env: { SHOP: 'gupta', DATA_DIR: tmpDir(), ACT_LIMIT_PER_MIN: '2' }, today: () => TODAY });
+  const base = await listen(srv);
+  try {
+    const post = (ip) => fetch(base + '/api/act', { method: 'POST', headers: { 'content-type': 'application/json', ...(ip ? { 'x-forwarded-for': ip } : {}) }, body: JSON.stringify({ action: 'nextDay', args: {} }) }).then((r) => r.status);
+    assert.deepEqual([await post('1.2.3.4'), await post('1.2.3.4'), await post('1.2.3.4')], [200, 200, 429]);
+    assert.equal(await post('5.6.7.8'), 200, 'another visitor has its own budget');
+    assert.deepEqual([await post(), await post(), await post()], [200, 200, 200], 'local calls are not limited');
+  } finally { srv.close(); }
+});

@@ -14,6 +14,8 @@
 //   VISION_MODEL           optional model id for reading copy photos (must accept images); unset = LLM_MODEL or router default
 //   OTHER_SHOPS            optional "Name|https://url,Name|https://url" for the shop switcher
 //   TWILIO_*, OWNER_WHATSAPP, PUBLIC_URL, STT_*   real WhatsApp and voice notes: see server/whatsapp.js
+//   ACT_LIMIT_PER_MIN      default 30: /api/act calls per minute per visitor IP (the public demo URL is open to anyone)
+//   PHOTO_LIMIT_PER_10MIN  default 5: /api/photo calls per 10 minutes per visitor IP (each one is an AI vision call)
 //   UDHAAR_ENV_FILE        optional KEY=value file read once at startup (default /home/node/udhaar.env).
 //                          Agent37 cannot pass env vars to an instance, so keys go in this file instead.
 //                          A variable already set in the real environment wins over the file.
@@ -185,9 +187,26 @@ function createServer(opts) {
     return snapshot({ freshTxn: out.freshTxn, result: out.result });
   }
 
+  // A small per-visitor rate limit for the routes that change the khata or spend AI calls. The page itself stays open
+  // (it is a public demo); this only stops one visitor from hammering the shop. Local calls (no proxy) are not limited.
+  const limits = { '/api/act': [+env.ACT_LIMIT_PER_MIN || 30, 60e3], '/api/photo': [+env.PHOTO_LIMIT_PER_10MIN || 5, 600e3] };
+  const hits = new Map();
+  function limited(req, route) {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const ip = fwd || req.socket.remoteAddress || '';
+    if (!fwd && /^(::1|127\.|::ffff:127\.)/.test(ip)) return false;
+    const [max, windowMs] = limits[route], key = route + ' ' + ip, now = Date.now();
+    const recent = (hits.get(key) || []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) { hits.set(key, recent); return true; }
+    recent.push(now); hits.set(key, recent);
+    if (hits.size > 5000) hits.clear();
+    return false;
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://x');
+      if (req.method === 'POST' && limits[url.pathname] && limited(req, url.pathname)) return send(res, 429, { error: 'too many requests, try again in a minute' });
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, pageHtml(), 'text/html; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
       if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true, shop: shopId, llm: engine.llm, scheduler: env.REAL_CLOCK === '1', llmCalls: engine.llmCalls, llmFallbacks: engine.llmFallbacks,
