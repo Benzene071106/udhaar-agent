@@ -541,3 +541,25 @@ test('a dictated entry is not counter talk', () => {
   for (const s of ['Sharma ji ne 340 ka saaman liya, kal denge', 'Pappu 200 cash', 'Sharma ji cheeni 2 kilo 90, tel 180']) assert.strictEqual(C.looksLikeCounter(s), false, s);
   for (const s of ['Raju do kilo cheeni la', 'kitna hua? 310', 'tel nikal']) assert.strictEqual(C.looksLikeCounter(s), true, s);
 });
+
+test('a customer asking "kitna baaki hai" gets the hisaab, never a payment-date question', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const v = s.customers.find((c) => c.name === 'Verma ji');
+  for (const q of ['Kitna baaki hai', 'कितना बाकी है', 'kitna dena hai', 'balance', 'meri list', 'hisaab batao']) {
+    const n = s.messages.length;
+    C.runAction(s, 'customer', { custId: v.id, text: q });
+    const got = s.messages.slice(n).filter((m) => m.to === v.id);
+    assert.strictEqual(got.length, 1, q);
+    assert.strictEqual(got[0].kind, 'statement', q);
+    assert.match(got[0].text, /Aapke naam: ₹\d+ baaki/, q);
+    assert.doesNotMatch(got[0].text, /Kab tak/, q);
+  }
+  // a greeting gets the menu; only an unclear message after a reminder asks for a date
+  const n = s.messages.length;
+  C.runAction(s, 'customer', { custId: v.id, text: 'Hi' });
+  assert.match(s.messages.slice(n).find((m) => m.to === v.id).text, /Kitna baaki hai/);
+  const fresh = s.customers.find((c) => !c.lastReminder && !c.reminderLevel && c.phone);
+  const k = s.messages.length;
+  C.runAction(s, 'customer', { custId: fresh.id, text: 'theek hai bhai' });
+  assert.doesNotMatch(s.messages.slice(k).find((m) => m.to === fresh.id).text, /Kab tak/);
+});

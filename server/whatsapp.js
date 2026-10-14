@@ -294,7 +294,7 @@ function createWhatsapp(o) {
       clearTimeout(timer); c.open = false; if (capture === c) capture = null;
       // the owner never believes a bill reached a customer when it was not sent or Twilio refused it
       const names = [...new Set(c.failed.map((to) => { const x = getState().customers.find((k) => k.waTo === to || '91' + k.phone === to); return x ? x.name : '+' + to; }).concat(c.skipped))];
-      if (names.length && c.msgs.length && c.to === ownerTo) c.msgs.push('⚠️ WhatsApp nahi pahuncha: ' + names.join(', ') + '. Unhe is number par ek baar "hi" bhejne boliye, phir dobara koshish karenge.');
+      if (names.length && c.msgs.length && c.to === ownerTo) c.msgs.push('⚠️ WhatsApp nahi pahuncha: ' + names.join(', ') + '. Unhe is number par ek baar "hi" bhejne boliye. Yeh bill dobara apne aap nahi jayega.');
       return c.msgs.slice();
     });
     return { replied, done };

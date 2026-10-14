@@ -961,6 +961,14 @@
     const tok = tokenize(text);
     const due = extractDue(tok, state.today).due;
     const bal = balance(state, c.id);
+    // "kitna baaki hai", "balance", "meri list": the customer gets the hisaab, never a payment-date question
+    if (/\s(kitna|kitana|kitne|kitni|balance|bakaya|hisab|hisaab|list|statement|khata)\s/.test(tok.text) && !/\s(diya|diye|kar diya|bhej diya)\s/.test(tok.text) && !due) {
+      if (Math.round(bal) <= 0) { emit(state, out, c.id, 'Aapka koi baaki nahi hai 🙏 - ' + state.shop.name); return out; }
+      const recent = state.txns.filter((t) => t.custId === c.id && !t.voided).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).slice(-4)
+        .map((t) => '  ' + fmtDate(t.date) + ': ' + rupees(t.amount) + ' ' + typeHi(t) + (t.lines ? '\n' + billText(t.lines) : t.items ? ' (' + t.items + ')' : '')).join('\n');
+      emit(state, out, c.id, '📄 ' + state.shop.name + '\nAapke naam: ' + rupees(Math.round(bal)) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: Math.round(bal) });
+      return out;
+    }
     if (/\s(cash|nakad|nakd|nagad|naqad|haath me|hath me)\s/.test(tok.text) && !due) {
       const amt = extractAmount(tok, new Set());
       const amount = amt && amt.amount > 0 ? amt.amount : Math.max(0, bal - pendingCash(state, c.id));
@@ -989,7 +997,9 @@
       emit(state, out, 'owner', '💬 ' + c.name + ' abhi ' + rupees(part.amount) + ' dena chahte hain.');
       return out;
     }
-    emit(state, out, c.id, 'Dhanyavaad 🙏 Kab tak de payenge? Jaise "Shukravar ko" ya "5 tareekh".');
+    // a payment date is asked only after a reminder; anything else gets the short menu, and the owner sees the message
+    if (bal > 0 && (c.reminderLevel > 0 || c.lastReminder) && !/^\s*(hi+|hello|helo|hey|namaste|namaskar|ram ram|jai shri krishna|good morning)(\s+ji)?\s*$/.test(tok.text)) emit(state, out, c.id, 'Dhanyavaad 🙏 Kab tak de payenge? Jaise "Shukravar ko" ya "5 tareekh".');
+    else emit(state, out, c.id, 'Namaste 🙏 Aap aise likh sakte hain:\n• "Kitna baaki hai"\n• "Cash de diya"\n• "Shukravar ko dunga"');
     emit(state, out, 'owner', '💬 ' + c.name + ': "' + text + '"');
     return out;
   }
