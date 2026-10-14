@@ -13,6 +13,7 @@
 //                          and at EVENING_HOUR (default 21) it sends the evening summary and cash batch
 //   VISION_MODEL           optional model id for reading copy photos (must accept images); unset = LLM_MODEL or router default
 //   OTHER_SHOPS            optional "Name|https://url,Name|https://url" for the shop switcher
+//   TWILIO_*, OWNER_WHATSAPP, PUBLIC_URL, STT_*   real WhatsApp and voice notes: see server/whatsapp.js
 //
 // Without the LLM variables, or when the LLM call fails, the offline Hinglish rule parser answers.
 'use strict';
@@ -20,6 +21,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const C = require('../core/agent-core.js');
+const { createWhatsapp } = require('./whatsapp.js');
 
 const ROOT = path.join(__dirname, '..');
 const MAX_BODY = 16 * 1024;
@@ -61,6 +63,7 @@ function createServer(opts) {
     fs.renameSync(tmp, file);
   }
 
+  const wa = createWhatsapp({ env, fetch: fetchImpl });
   const engine = { llm: !!llmUrl, model: model || 'router default', lastError: null, llmCalls: 0, llmFallbacks: 0 };
 
   // The token is read at call time: Agent37 issues a new one whenever the sandbox restarts.
@@ -134,7 +137,7 @@ function createServer(opts) {
   function snapshot(extra) {
     return Object.assign({
       state, dashboard: C.dashboard(state, 30), shopId,
-      engine: { llm: engine.llm, model: engine.model, lastError: engine.lastError },
+      engine: { llm: engine.llm, model: engine.model, lastError: engine.lastError, whatsapp: wa.stats.enabled },
       others
     }, extra || {});
   }
@@ -184,14 +187,42 @@ function createServer(opts) {
       const url = new URL(req.url, 'http://x');
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, pageHtml(), 'text/html; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
-      if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true, shop: shopId, llm: engine.llm, scheduler: env.REAL_CLOCK === '1', llmCalls: engine.llmCalls, llmFallbacks: engine.llmFallbacks });
+      if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true, shop: shopId, llm: engine.llm, scheduler: env.REAL_CLOCK === '1', llmCalls: engine.llmCalls, llmFallbacks: engine.llmFallbacks,
+        whatsapp: { enabled: wa.stats.enabled, sending: wa.stats.sending, voice: wa.stats.stt, received: wa.stats.received, sent: wa.stats.sent, failed: wa.stats.failed, lastError: wa.stats.lastError } });
+      if (req.method === 'POST' && url.pathname === '/whatsapp') {
+        if (!wa.stats.enabled) return send(res, 404, { error: 'not found' });
+        let raw;
+        try { raw = await readBody(req); } catch (e) { return send(res, 413, { error: 'body too large' }); }
+        const params = Object.fromEntries(new URLSearchParams(raw));
+        if (!wa.verify(req, params)) return send(res, 403, { error: 'bad signature' });
+        // Answer Twilio at once; replies go out through the API, so a slow voice note never times the webhook out.
+        send(res, 200, '<?xml version="1.0" encoding="UTF-8"?><Response></Response>', 'text/xml');
+        serial(() => wa.handle(params, act, () => state, save)).then(() => save(), (e) => { wa.stats.lastError = String(e.message || e).slice(0, 200); });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/pay/')) {
+        const html = wa.payPage(state, decodeURIComponent(url.pathname.slice(5)));
+        save(); // keeps the pay-link secret once made
+        return html ? send(res, 200, html, 'text/html; charset=utf-8') : send(res, 404, { error: 'not found' });
+      }
+      if (req.method === 'GET' && url.pathname === '/join') {
+        const html = wa.joinPage(state);
+        return html ? send(res, 200, html, 'text/html; charset=utf-8') : send(res, 404, { error: 'not found' });
+      }
       if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, snapshot());
       if (req.method === 'POST' && url.pathname === '/api/act') {
         if (!/application\/json/.test(req.headers['content-type'] || '')) return send(res, 415, { error: 'send JSON' });
         if (+req.headers['content-length'] > MAX_BODY) { res.setHeader('connection', 'close'); return send(res, 413, { error: 'body too large' }); }
         let body;
         try { body = JSON.parse(await readBody(req) || '{}'); } catch (e) { return send(res, e.code === 413 ? 413 : 400, { error: e.code === 413 ? 'body too large' : 'bad JSON' }); }
-        const out = await serial(() => act(String(body.action || ''), body.args || {}));
+        const action = String(body.action || '');
+        const out = await serial(async () => {
+          const from = state.messages.length, before = state;
+          const r = await act(action, body.args || {});
+          // customers on WhatsApp get what the owner did on the web page; the owner already sees it here
+          if (state === before) { wa.deliver(state, from, null, { skipOwner: true }); save(); }
+          return r;
+        });
         return send(res, 200, out);
       }
       if (req.method === 'POST' && url.pathname === '/api/photo') {
@@ -219,9 +250,10 @@ function createServer(opts) {
     const ran = [];
     return serial(() => {
       const now = today();
+      const from = state.messages.length;
       for (let i = 0; i < 31 && state.today < now; i++) { C.runAction(state, 'nextDay'); ran.push('nextDay'); }
       if (hourNow() >= evening && state.eveningSentFor !== state.today && state.today === now) { C.runAction(state, 'closeDay'); ran.push('closeDay'); }
-      if (ran.length) save();
+      if (ran.length) { wa.deliver(state, from); save(); }
       return ran;
     });
   }
@@ -230,6 +262,8 @@ function createServer(opts) {
   server.tick = tick;
   server.getState = () => state;
   server.engine = engine;
+  server.whatsapp = wa;
+  server.idle = () => queue.then(() => wa.idle());
   return server;
 }
 

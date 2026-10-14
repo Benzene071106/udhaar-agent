@@ -69,13 +69,53 @@ Real accuracy on handwritten copies is not yet measured. It needs real pages.
 |---|---|
 | Customer Haan / Galat on each entry and monthly statement, ✓ in the khata, galat into the evening batch |  |
 | Copy photo to khata, experimental (reading needs an AI; dedupe and ✅ are plain code) |  |
-| Voice or text to khata (Hinglish and Devanagari), with the LLM or the offline rules | WhatsApp: messages show in the on-screen phones; none are sent |
+| Voice or text to khata (Hinglish and Devanagari), with the LLM or the offline rules | WhatsApp on the demo page: messages show in the on-screen phones (the shop server sends real ones through Twilio, see below) |
 | Reminder ladder on the due date, +3 days and +7 days | UPI: the pay sheet and bank SMS are generated; no money moves |
 | Matching UPI SMS to customers; cash claims with the evening ✅/❌ batch | The lender (Saathi Finance) and the data share |
 | Galla Mic: trigger words, drops chit-chat, cross-checks "N baaki" | 75 days of past khata for each demo shop, sized like a typical Nagpur general store: 24-25 customers on udhaar, up to about ₹4,000 each |
 | Dashboard, credit score, consent rules | |
 
-Live speech-to-text uses Chrome's speech recognition, which sends audio to Google's servers. The agent itself stores no audio.
+Live speech-to-text on the demo page uses Chrome's speech recognition, which sends audio to Google's servers. WhatsApp voice notes go to our own Whisper server instead. The agent stores no audio.
+
+## Real WhatsApp (owner and customers on their own phones)
+
+The shop server talks on real WhatsApp through Twilio. The owner's number talks to the agent. Every other number is a customer.
+
+- **Join in one scan.** `/join` shows a QR code. Scanning it opens WhatsApp with the join words already typed in. After that, one "hi" makes that number a customer under its WhatsApp name. If the owner already had a khata under that name with no number, the number is added to it.
+- **Owner: text or voice note.** "Rohit ji cheeni 2 kilo 90, tel 1 litre 180" works as text or as a voice note. The agent replies `🎙️ Suna: "..."` so the owner sees what it heard before anything else happens.
+- **Customer: one word.** Each entry arrives as an item-wise bill. The customer answers *Haan* or *Galat*. "cash de diya" makes a cash claim, and the owner is asked about it right away with `⏳ ... Jawab: haan / nahi`. The owner's one word settles it, and the customer gets a receipt. Pending items come one at a time.
+- **No scanner, no QR stand.** A reminder carries the customer's own pay link (`/pay/<id>.<secret>`). It shows today's baaki and one UPI button with the amount already filled in. The same page says cash at the counter counts the same.
+- **No cold messages.** The agent only messages numbers that wrote to the shop first. A number the owner typed in is used for matching, never for a first message.
+- **Webhooks are signed.** Requests without a valid `X-Twilio-Signature` are refused. Without `TWILIO_AUTH_TOKEN` the `/whatsapp` endpoint doesn't exist.
+
+Actions taken on the web page reach customers on WhatsApp but are not echoed to the owner, who is already looking at the page. Reminders and the evening summary from the scheduler go to both.
+
+### Set it up (Twilio WhatsApp Sandbox, free)
+
+1. Create a Twilio account. In the Console open Messaging, then *Try it out*, then *Send a WhatsApp message*. Note the Sandbox number (`+1 415 523 8886`) and your join words (`join <two-words>`).
+2. In *Sandbox settings*, set "When a message comes in" to `https://<your-server>/whatsapp`, method `POST`.
+3. Start the shop server with:
+
+```
+TWILIO_ACCOUNT_SID=AC... TWILIO_AUTH_TOKEN=... TWILIO_WHATSAPP_FROM=whatsapp:+14155238886 \
+OWNER_WHATSAPP=+9198xxxxxxxx PUBLIC_URL=https://<your-server> WA_JOIN_CODE="join <two-words>" \
+SHOP=nayi node server/server.js
+```
+
+4. The owner's phone sends the join words, then anything. Each customer scans `/join`. Sandbox members have to send the join words again after 3 days.
+
+`GET /healthz` shows `whatsapp.received / sent / failed` and the last Twilio error.
+
+### Voice notes (Whisper on a GPU)
+
+Set `STT_URL` to any OpenAI-compatible speech-to-text server (`/audio/transcriptions`). `stt/whisper_server.py` is one: faster-whisper `large-v3` on a GPU, Hindi by default, nudged toward Hinglish in Roman letters. It is built for Nodus compute at the finale:
+
+```
+cd stt && pip install -r requirements.txt && STT_KEY=... uvicorn whisper_server:app --host 0.0.0.0 --port 9000
+# shop server: STT_URL=https://<gpu-host>:9000/v1 STT_KEY=...
+```
+
+Voice notes are transcribed in memory and never stored. With Whisper on our own GPU, shop audio no longer goes to Google. Without `STT_URL`, the owner gets "Voice note abhi chalu nahi hai, likh kar bhejiye".
 
 ## Credit score and consent
 
@@ -233,10 +273,10 @@ Edit `core/`, `web/` or `server/`, then rebuild. Never edit `dist/` by hand.
 ## Test
 
 ```
-node --test test/core.test.js test/server.test.js
+node --test test/core.test.js test/server.test.js test/whatsapp.test.js
 ```
 
-There are 39 tests:
+There are 47 tests:
 
 - **Core (29):** bill with rates (spoken lines, the customer's list, rate memory with grams, half litres and counts, a stated total wins, a new rate replaces the old one, an unknown rate is asked for, Devanagari); do-taraf khata (Haan sets ✓, no reply in 24 hours counts as accepted but galat still works, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
 - **Server (10):**
@@ -250,6 +290,7 @@ There are 39 tests:
   - copy photo over HTTP (the server's own AI reads it, the photo isn't stored, a browser-sent reading is refused, no AI returns `no_ai`)
   - the scheduler sends reminders on a new day and the evening summary once
   - the Dockerfile builds the page, turns the scheduler on, and listens on port 8000
+- **WhatsApp (8):** the stage loop over signed webhooks (a new number joins, gets the item-wise bill, says haan, says cash de diya, the owner says haan, receipt); unsigned webhooks refused; an owner voice note transcribed, echoed and written; voice refused without speech-to-text or from a non-Twilio URL; typed-in numbers never cold-messaged and web actions not echoed to the owner; galat hai settled by the owner's one word; the pay page needs its secret and shows cash on equal terms, and the join QR; one-word yes/no detection.
 
 ## Layout
 
@@ -257,6 +298,8 @@ There are 39 tests:
 |---|---|
 | `core/agent-core.js` | The agent: parser, ledger, reminders, UPI and cash matching, Galla Mic scanner, credit score and consent, dashboard, two demo shops, and `runAction` (the one entry point the page and the server share). Pure JS; works in a browser and in Node. |
 | `server/server.js` | One shop's agent server: khata on disk, LLM via the Agent37 router with the rules as fallback. |
+| `server/whatsapp.js` | Real WhatsApp through Twilio: signed webhook, owner and customer routing, voice notes, pay page, join QR. |
+| `stt/whisper_server.py` | Hindi speech-to-text on a GPU (faster-whisper), OpenAI-compatible, for voice notes. |
 | `Dockerfile` | The Agent37 custom image (port 8000). |
 | `web/index.src.html` | The demo page: shop switcher, shopkeeper's phone, customer's phone, Galla Mic, credit score, baaki list, dashboard, bahi-khata. |
 | `vendor/qrcode-generator.js` | QR code library for the UPI QR (MIT, Kazuhiko Arase). |
@@ -266,6 +309,6 @@ There are 39 tests:
 
 ## Saved for the finale
 
-- Real WhatsApp Business API messages instead of the on-screen phones.
+- A WhatsApp Business number instead of the Twilio Sandbox, so customers don't need the join words.
 - A real lender connection through an Account Aggregator, instead of the demo lender.
-- On-device speech-to-text (for example Whisper), so counter audio never leaves the shop.
+- Whisper for the Galla Mic and the web page too, so counter audio never goes to Google.

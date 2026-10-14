@@ -1523,6 +1523,49 @@
   }
   const openChecks = (state, custId) => claims(state).filter((k) => k.type === 'check' && k.status === 'pending' && k.custId === custId).length;
 
+  // ---------------------------------------------- real WhatsApp: who is writing, and short yes/no replies
+  /**
+   * A phone number wrote to the shop's WhatsApp. A known number is that customer; a new number becomes a customer
+   * under their WhatsApp name (or joins the one khata of that name that has no number yet). Only numbers that wrote
+   * first are ever messaged (c.wa), so the agent never cold-messages a number someone typed in.
+   */
+  function customerFromWhatsapp(state, phone, profileName) {
+    let c = state.customers.find((x) => x.phone === phone);
+    if (c) { const fresh = !c.wa; c.wa = true; return welcome(state, c, fresh, false); }
+    const tok = tokenize(String(profileName || '').replace(/[^\p{L}\s.]/gu, ' ').slice(0, 60));
+    const words = tok.norm.map((w, i) => ({ n: w, d: tok.display[i] })).filter((w) => /^[a-z]{2,}$/.test(w.n)).slice(0, 3);
+    const key = words.length ? nameKey(words.map((w) => w.n)) : '';
+    const same = key ? findCustomers(state, key).filter((x) => !x.phone) : [];
+    if (same.length === 1) {
+      c = same[0]; c.phone = phone; c.wa = true;
+      log(state, 'customer', c.name + ' joined on WhatsApp');
+      return welcome(state, c, true, false);
+    }
+    const name = words.length ? prettyName(words.map((w) => w.d)) : 'Grahak ' + phone.slice(-4);
+    c = addCustomer(state, state.customers.some((x) => x.key === key) ? name + ' ' + phone.slice(-4) : name, key || 'grahak ' + phone.slice(-4), { phone, wa: true });
+    log(state, 'customer', 'New khata from WhatsApp: ' + c.name);
+    return welcome(state, c, true, true);
+  }
+  function welcome(state, c, joined, isNew) {
+    const out = [];
+    if (joined) {
+      emit(state, out, c.id, 'Namaste ' + c.name + ' 🙏 Aap ' + state.shop.name + ' ke khate se jud gaye.\nAb har udhaar ki list aur hisaab yahin aayega, aap "Haan" ya "Galat" bol sakte hain.\nCash de diya ho toh bas likhiye "cash de diya".', { kind: 'wa-welcome' });
+      emit(state, out, 'owner', '📱 ' + c.name + ' WhatsApp par jud gaye' + (isNew ? ' (naya khata). Ab "' + c.name.split(' ')[0] + ' ..." bolkar udhaar likhiye.' : '.'), { kind: 'wa-joined' });
+    }
+    return { cust: c, joined, isNew, out };
+  }
+  /** "haan" / "sahi hai" / ✅ → 'yes', "galat" / "nahi" / ❌ → 'no'. Only short replies count; anything longer is a real message. */
+  function shortAnswer(text) {
+    const s = String(text || '').trim();
+    if (!s || s.split(/\s+/).length > 3) return null;
+    if (/^(✅|👍|☑️|✔️)+$/u.test(s)) return 'yes';
+    if (/^(❌|👎|✖️)+$/u.test(s)) return 'no';
+    const t = ' ' + tokenize(s).norm.join(' ') + ' ';
+    if (/ (galat|glt|wrong|nahi|nahin|nhi|na|no|nope) /.test(t)) return 'no';
+    if (/ (haan|han|ha|haa|haanji|ji|sahi|theek|thik|ok|okay|yes|y|mila|mil|confirm) /.test(t)) return 'yes';
+    return null;
+  }
+
   // ---------- one entry point for every user action (used by the web page and by the per-shop server) ----------
   const ACTIONS = ['owner', 'upi', 'customer', 'confirm', 'galla', 'closeDay', 'nextDay', 'consentRequest', 'consentAnswer', 'consentRevoke', 'copyRead', 'copyDecide', 'copyConfirmAll', 'statements', 'customerCheck'];
   const looksLikeUpiSms = (t) => /(credited|received|recd)/i.test(t) && /(rs\.?|inr|₹)\s*[\d,]+/i.test(t);
@@ -1594,6 +1637,8 @@
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
     runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
+    // real WhatsApp channel
+    customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),
     // item lines + rate memory
     itemize, learnRates, rateList, billText,
     // utils
