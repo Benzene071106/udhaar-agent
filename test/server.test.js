@@ -189,6 +189,7 @@ test('the Dockerfile builds the page and serves port 8000', () => {
   assert.match(df, /RUN node build\.js/);
   assert.match(df, /EXPOSE 8000/);
   assert.match(df, /REAL_CLOCK=1/);
+  assert.match(df, /DATA_DIR=\/home\/node\/data/, 'khata lives on the persistent mount');
   assert.match(df, /CMD \["node", "server\/server\.js"\]/);
   for (const f of ['core', 'web', 'vendor', 'server', 'build.js']) assert.ok(df.includes('COPY ' + f), f);
 });
