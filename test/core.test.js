@@ -484,6 +484,10 @@ test('a new spoken rate replaces the old one; an unknown rate is asked for, not 
   assert.strictEqual(s.txns[s.txns.length - 1].amount, 120);
   assert.doesNotMatch(d.result.messages[0].text, /Naya daam/);
   assert.strictEqual(Object.values(s.prices).find((p) => p.name === 'doodh').rate, 30);
+  // the same for an item the shop has no rate for yet: nothing is learned from an amount
+  C.runAction(s, 'owner', { text: 'Pappu ne 90 ka paneer liya' });
+  assert.ok(!Object.values(s.prices).some((p) => p.name === 'paneer'));
+  assert.ok(s.txns[s.txns.length - 1].amount === 90);
 });
 test('Devanagari bill', () => {
   const s = C.freshShop('gupta', TODAY);

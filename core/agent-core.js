@@ -377,6 +377,7 @@
       const x = Object.assign({}, l, { from: l.price != null ? 'spoken' : null });
       const known = x.bare && prices(state)[x.key];
       if (known && x.price < known.rate) { x.qty = x.price; x.price = null; x.from = null; } // "sabun 2" = two soaps when soap is ₹40
+      if (x.from === 'spoken' && !x.bare && x.qty == null && !x.unit) x.amountOnly = true; // "120 ka doodh"
       delete x.bare;
       return x;
     });
@@ -411,8 +412,9 @@
       // "tel 180" with no unit means one of the usual unit (a litre), so it never wipes out a per-litre rate
       const [unit, f] = l.unit ? baseOf(l.unit) : [old ? old.unit : '', 1];
       const rate = Math.round((l.price / (l.unit ? l.qty * f : (l.qty || 1))) * 100) / 100;
-      // "120 ka doodh" with no quantity is money spent, not a rate: far from the known rate, it teaches nothing
-      if (old && !l.unit && l.qty == null && (rate > old.rate * 1.5 || rate < old.rate * 0.5)) continue;
+      // with no quantity, "120 ka doodh" is money spent, not a rate; "sabun 40" teaches a per-piece rate only for an
+      // item counted in pieces, never one sold by kilo, litre or packet
+      if (!l.unit && l.qty == null && (l.amountOnly || (old && old.unit))) continue;
       if (old && old.unit === unit && Math.abs(old.rate - rate) < 0.01) { old.date = state.today; continue; }
       if (old && old.unit === unit) notes.push(cap(l.name) + ' ' + rateText(old.rate, unit) + ' → ' + rateText(rate, unit));
       else notes.push(cap(l.name) + ' ' + rateText(rate, unit));
