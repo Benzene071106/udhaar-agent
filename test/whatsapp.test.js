@@ -23,6 +23,7 @@ function fakeFetch(opts) {
     url = String(url); calls.push({ url, init });
     if (url.includes('/Messages.json')) {
       const p = new URLSearchParams(init.body);
+      if (opts.sendFail) return new Response('{"code":21654,"message":"ContentSid Required"}', { status: 400 });
       sent.push({ to: p.get('To'), body: p.get('Body'), media: p.get('MediaUrl') });
       return new Response('{}', { status: 201 });
     }
@@ -269,4 +270,28 @@ test('WA_REPLY_TWIML=1: the sender gets the answer inside the webhook reply, oth
     assert.match(await o.text(), /<Message>[^<]*340/);
     assert.equal(server.getState().customers.find((c) => c.name === 'Rohit').phone, JUDGE.slice(-10));
   } finally { server.close(); }
+});
+
+test('WA_REPLY_TWIML=1: the owner is told when a bill did not reach the customer', async () => {
+  const { server, fetch: tw } = waServer({ WA_REPLY_TWIML: '1' });
+  const base = await listen(server);
+  try {
+    // a number the owner typed in, but that has never written to the shop: nothing can be sent to it
+    await inbound(base, server, { From: from(OWNER), Body: 'Verma ji ne 120 ka saaman liya' });
+    await inbound(base, server, { From: from(OWNER), Body: 'Verma ji ka number 9876543210' });
+    const o = await inbound(base, server, { From: from(OWNER), Body: 'Verma ji ne 2 kilo cheeni 90 liya' });
+    assert.match(await o.text(), /WhatsApp nahi pahuncha: Verma ji\./);
+    // a customer who joined, but Twilio refuses the send
+    await inbound(base, server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    tw.clear();
+  } finally { server.close(); }
+  const f = waServer({ WA_REPLY_TWIML: '1' }, { sendFail: true });
+  const base2 = await listen(f.server);
+  try {
+    await inbound(base2, f.server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    const o = await inbound(base2, f.server, { From: from(OWNER), Body: 'Rohit ne 2 kilo cheeni 90 liya' });
+    const xml = await o.text();
+    assert.match(xml, /Rohit ko WhatsApp par bhej rahe hain/);
+    assert.match(xml, /WhatsApp nahi pahuncha: Rohit\./);
+  } finally { f.server.close(); }
 });

@@ -63,7 +63,10 @@ function createWhatsapp(o) {
     }).then(async (r) => {
       if (!r.ok) throw new Error('Twilio HTTP ' + r.status + ' ' + String(await r.text().catch(() => '')).slice(0, 160));
       stats.sent++;
-    }).catch((e) => { stats.failed++; stats.lastError = String(e.message || e).slice(0, 200); });
+    }).catch((e) => {
+      stats.failed++; stats.lastError = String(e.message || e).slice(0, 200);
+      if (capture && capture.open && to !== capture.to && to !== ownerTo) capture.failed.push(to);
+    });
   }
   // In order, one after another, so a bill never arrives after its receipt.
   function queueSend(to, body) { outQueue = outQueue.then(() => sendNow(to, body)); return outQueue; }
@@ -150,6 +153,7 @@ function createWhatsapp(o) {
       if (m.from !== 'agent' || (skipOwner && m.to === 'owner')) continue;
       const to = recipient(state, m.to);
       if (to) { queueSend(to, waText(state, m)); if (m.to !== 'owner') queueVoice(to, voiceScript(state, m)); }
+      else if (m.to !== 'owner' && capture && capture.open) { const k = state.customers.find((x) => x.id === m.to); if (k) capture.skipped.push(k.name); }
     }
     const next = C.pendingClaims(state)[0];
     if (next && state.waAsked !== next.id && !skipOwner) {
@@ -281,12 +285,18 @@ function createWhatsapp(o) {
    * webhook has to answer; anything for the sender after that goes out through the Messages API as usual.
    */
   function handleForReply(params, act, getState, save, waitMs) {
-    const c = { to: digits(params.From), msgs: [], open: true };
+    const c = { to: digits(params.From), msgs: [], failed: [], skipped: [], open: true };
     capture = c;
     const done = handle(params, act, getState, save).then(() => outQueue);
     let timer;
     const timeout = new Promise((r) => { timer = setTimeout(r, waitMs || 12000); });
-    const replied = Promise.race([done, timeout]).then(() => { clearTimeout(timer); c.open = false; if (capture === c) capture = null; return c.msgs.slice(); });
+    const replied = Promise.race([done, timeout]).then(() => {
+      clearTimeout(timer); c.open = false; if (capture === c) capture = null;
+      // the owner never believes a bill reached a customer when it was not sent or Twilio refused it
+      const names = [...new Set(c.failed.map((to) => { const x = getState().customers.find((k) => k.waTo === to || '91' + k.phone === to); return x ? x.name : '+' + to; }).concat(c.skipped))];
+      if (names.length && c.msgs.length && c.to === ownerTo) c.msgs.push('⚠️ WhatsApp nahi pahuncha: ' + names.join(', ') + '. Unhe is number par ek baar "hi" bhejne boliye, phir dobara koshish karenge.');
+      return c.msgs.slice();
+    });
     return { replied, done };
   }
   function twiml(msgs) {

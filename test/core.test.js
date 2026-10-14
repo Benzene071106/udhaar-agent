@@ -479,6 +479,11 @@ test('a new spoken rate replaces the old one; an unknown rate is asked for, not 
   const q = C.runAction(s, 'owner', { text: 'Kavita aunty cheeni 1 kilo, kaju 200 gram' });
   assert.strictEqual(s.txns.length, before);
   assert.match(q.result.messages[0].text, /daam abhi yaad nahi: kaju/);
+  // "120 ka doodh" with no quantity is money spent: the ₹30/packet rate stays
+  const d = C.runAction(s, 'owner', { text: 'Verma ji ne 120 ka doodh liya' });
+  assert.strictEqual(s.txns[s.txns.length - 1].amount, 120);
+  assert.doesNotMatch(d.result.messages[0].text, /Naya daam/);
+  assert.strictEqual(Object.values(s.prices).find((p) => p.name === 'doodh').rate, 30);
 });
 test('Devanagari bill', () => {
   const s = C.freshShop('gupta', TODAY);

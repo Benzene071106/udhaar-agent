@@ -411,6 +411,8 @@
       // "tel 180" with no unit means one of the usual unit (a litre), so it never wipes out a per-litre rate
       const [unit, f] = l.unit ? baseOf(l.unit) : [old ? old.unit : '', 1];
       const rate = Math.round((l.price / (l.unit ? l.qty * f : (l.qty || 1))) * 100) / 100;
+      // "120 ka doodh" with no quantity is money spent, not a rate: far from the known rate, it teaches nothing
+      if (old && !l.unit && l.qty == null && (rate > old.rate * 1.5 || rate < old.rate * 0.5)) continue;
       if (old && old.unit === unit && Math.abs(old.rate - rate) < 0.01) { old.date = state.today; continue; }
       if (old && old.unit === unit) notes.push(cap(l.name) + ' ' + rateText(old.rate, unit) + ' → ' + rateText(rate, unit));
       else notes.push(cap(l.name) + ' ' + rateText(rate, unit));
@@ -719,7 +721,7 @@
         const heardSum = said != null ? tx.lines.filter((l) => l.from !== 'extra').reduce((a, l) => a + l.price, 0) : null;
         let text = (ct ? '🧾 Dukaan ki baat se bill. ' : '') + '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' +
           (tx.lines ? ':\n' + billText(tx.lines) + (remembered.length ? '\n🧠 Daam yaad se: ' + remembered.map((l) => l.name + ' ' + rateText(l.rate, l.rateUnit)).join(', ') : '') +
-            (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko bhej di, woh "Haan / Galat" se check karenge.' : '')
+            (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko WhatsApp par bhej rahe hain, woh "Haan / Galat" se check karenge.' : '')
             : (intent.items ? ' (' + intent.items + ')' : '') + '.') + '\nKul baaki: ' + rupees(balance(state, cust.id)) + '\n📅 ' +
           (intent.dueDate ? 'Wada: ' + fmtDay(due) + '. Usi din yaad dila dunga.' : fmtDay(due) + ' ko yaad dila dunga (koi tareekh nahi boli thi).');
         if (said != null && Math.round(said - heardSum)) text += '\n⚠️ Items ka jod ' + rupees(heardSum) + ', bola gaya total ' + rupees(said) + '. ' + rupees(said) + ' likha. Galat ho toh "galti" boliye.';
