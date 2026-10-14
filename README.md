@@ -35,6 +35,17 @@ Most kirana shops have no barcode or QR scanner, so the bill comes from the owne
 - A rate the agent doesn't know is asked for once ("kaju ka daam abhi yaad nahi"), and nothing is written until the owner says it. No catalogue to set up.
 - Time for the owner: 10 to 20 seconds of speaking for 5 or 6 items, done while packing. Nothing to tap.
 
+### Counter bill (the shop's own talk)
+
+Often the owner doesn't dictate a bill at all. They call the items out to a helper, and someone says the total out loud at the end. The owner holds the WhatsApp mic through that, and the agent turns the talk into the bill:
+
+> "Aaiye Iqbal bhai. Raju, do kilo atta la, ek litre tel bhi nikal, maggi do. Kitna hua? 290"
+
+- The items come from the orders (`Atta 2 kilo = ₹84`, `Tel 1 litre = ₹180`, `Maggi ×2 = ₹28`), priced from rate memory. "maggi do" means two.
+- The total said aloud is the amount written, because it is what the customer heard. When the items don't add up to it, the owner sees `⚠️ Items ka jod ₹292, bola gaya total ₹290`, and both lists show the ₹2 as `Chhoot`.
+- The customer is a khata name in the talk, preferring one said with "ji / bhai" or "ke khate mein". A name that only gets orders ("Raju, ... la") is the helper, never the customer. With no name heard, nothing is written, and the agent asks "Kiske khate mein likhun?". A bare name like "Pappu" finishes it.
+- Chatter ("aur kuch? bas") is dropped. Only the bill is kept. The mic runs only while the owner holds it: there is no always-on listening.
+
 ## Copy photo (future / experimental)
 
 Not the owner's first action: voice and text are. The 📷 button stays for trying it out. Reading accuracy on real handwritten copies is untested.
@@ -116,6 +127,10 @@ cd stt && pip install -r requirements.txt && STT_KEY=... uvicorn whisper_server:
 ```
 
 Voice notes are transcribed in memory and never stored. With Whisper on our own GPU, shop audio no longer goes to Google. Without `STT_URL`, the owner gets "Voice note abhi chalu nahi hai, likh kar bhejiye".
+
+### Hindi voice notes for customers (ElevenLabs)
+
+With `ELEVENLABS_API_KEY` set, a customer's new bill and each reminder also arrive as a short Hindi voice note in the shop's name, right after the text. It helps customers who listen more than they read. The text always goes first, and if ElevenLabs fails the text alone still arrives. The owner never gets voice notes. The audio stays in memory for an hour so Twilio can fetch it from `/media/<random id>.mp3`, and it is never written to disk. `ELEVENLABS_VOICE_ID` picks the voice (pick a Hindi voice from the ElevenLabs voice library). `ELEVENLABS_MODEL` defaults to `eleven_multilingual_v2`.
 
 ## Credit score and consent
 
@@ -276,9 +291,9 @@ Edit `core/`, `web/` or `server/`, then rebuild. Never edit `dist/` by hand.
 node --test test/core.test.js test/server.test.js test/whatsapp.test.js
 ```
 
-There are 47 tests:
+There are 52 tests:
 
-- **Core (29):** bill with rates (spoken lines, the customer's list, rate memory with grams, half litres and counts, a stated total wins, a new rate replaces the old one, an unknown rate is asked for, Devanagari); do-taraf khata (Haan sets ✓, no reply in 24 hours counts as accepted but galat still works, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
+- **Core (33):** counter bill (items from orders to the helper, the spoken total wins and a gap is flagged, number words, the helper never becomes the customer, no name asks whose khata, dictated entries aren't mistaken for counter talk); bill with rates (spoken lines, the customer's list, rate memory with grams, half litres and counts, a stated total wins, a new rate replaces the old one, an unknown rate is asked for, Devanagari); do-taraf khata (Haan sets ✓, no reply in 24 hours counts as accepted but galat still works, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
 - **Server (10):**
   - each shop keeps its own khata file and it survives a restart
   - the page is served with the shop config
@@ -290,7 +305,7 @@ There are 47 tests:
   - copy photo over HTTP (the server's own AI reads it, the photo isn't stored, a browser-sent reading is refused, no AI returns `no_ai`)
   - the scheduler sends reminders on a new day and the evening summary once
   - the Dockerfile builds the page, turns the scheduler on, and listens on port 8000
-- **WhatsApp (8):** the stage loop over signed webhooks (a new number joins, gets the item-wise bill, says haan, says cash de diya, the owner says haan, receipt); unsigned webhooks refused; an owner voice note transcribed, echoed and written; voice refused without speech-to-text or from a non-Twilio URL; typed-in numbers never cold-messaged and web actions not echoed to the owner; galat hai settled by the owner's one word; the pay page needs its secret and shows cash on equal terms, and the join QR; one-word yes/no detection.
+- **WhatsApp (9):** ElevenLabs voice note after the text, Hindi script, audio served for Twilio, text alone when ElevenLabs fails; the stage loop over signed webhooks (a new number joins, gets the item-wise bill, says haan, says cash de diya, the owner says haan, receipt); unsigned webhooks refused; an owner voice note transcribed, echoed and written; voice refused without speech-to-text or from a non-Twilio URL; typed-in numbers never cold-messaged and web actions not echoed to the owner; galat hai settled by the owner's one word; the pay page needs its secret and shows cash on equal terms, and the join QR; one-word yes/no detection.
 
 ## Layout
 

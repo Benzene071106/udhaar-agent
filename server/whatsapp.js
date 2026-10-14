@@ -13,6 +13,8 @@
 //   WA_JOIN_CODE                            Sandbox join words, e.g. "join shiny-tiger"; shown as a QR at /join
 //   STT_URL, STT_KEY, STT_MODEL, STT_LANGUAGE   OpenAI-compatible speech-to-text for voice notes
 //                                           (/audio/transcriptions; e.g. Whisper on a GPU). Unset = voice notes are refused politely.
+//   ELEVENLABS_API_KEY                      customers also get each bill and reminder as a Hindi voice note (ElevenLabs);
+//   ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL   unset = text only. Default model eleven_multilingual_v2.
 'use strict';
 const crypto = require('crypto');
 const C = require('../core/agent-core.js');
@@ -45,9 +47,11 @@ function createWhatsapp(o) {
 
   // ---------------------------------------------------------------- outbound
   let outQueue = Promise.resolve();
-  function sendNow(to, body) {
+  function sendNow(to, body, mediaUrl) {
     if (!stats.sending || !to) return Promise.resolve();
-    const form = new URLSearchParams({ From: sender, To: 'whatsapp:+' + to, Body: String(body).slice(0, 1590) });
+    const form = new URLSearchParams({ From: sender, To: 'whatsapp:+' + to });
+    if (body) form.set('Body', String(body).slice(0, 1590));
+    if (mediaUrl) form.set('MediaUrl', mediaUrl);
     return fetchImpl(api + '/2010-04-01/Accounts/' + encodeURIComponent(sid) + '/Messages.json', {
       method: 'POST', body: form.toString(),
       headers: { authorization: 'Basic ' + Buffer.from(sid + ':' + token).toString('base64'), 'content-type': 'application/x-www-form-urlencoded' }
@@ -58,6 +62,56 @@ function createWhatsapp(o) {
   }
   // In order, one after another, so a bill never arrives after its receipt.
   function queueSend(to, body) { outQueue = outQueue.then(() => sendNow(to, body)); return outQueue; }
+
+  // ---------------------------------------------------------------- Hindi voice notes (ElevenLabs)
+  // For customers who listen more than they read: the bill and the reminder also arrive as a short voice note in the
+  // shop's name. The text always goes first; if the voice fails, the text alone is enough.
+  const tts = { key: env.ELEVENLABS_API_KEY || '', voice: env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM', model: env.ELEVENLABS_MODEL || 'eleven_multilingual_v2',
+    api: (env.ELEVENLABS_API_BASE || 'https://api.elevenlabs.io').replace(/\/+$/, '') };
+  stats.voiceNotes = !!(tts.key && publicUrl);
+  const media = new Map(); // id -> { buf, at }; kept an hour so Twilio can fetch it, never written to disk
+  const MEDIA_TTL = 60 * 60 * 1000;
+  function keepMedia(buf) {
+    const now = Date.now();
+    for (const [k, v] of media) if (now - v.at > MEDIA_TTL || media.size > 200) media.delete(k);
+    const id = crypto.randomBytes(12).toString('hex');
+    media.set(id, { buf, at: now });
+    return id;
+  }
+  function getMedia(id) { const m = media.get(id); return m && Date.now() - m.at <= MEDIA_TTL ? m.buf : null; }
+  const say = (n) => Math.round(n) + ' रुपये';
+  const UNIT_WORD = { kg: 'kilo', g: 'gram', l: 'litre', ml: 'ml', pkt: 'packet', pc: '', pav: 'pav', dozen: 'dozen' };
+  /** What the voice note says: short, in Hindi, in the shop's name. Null for messages that stay text only. */
+  function voiceScript(state, m) {
+    const c = state.customers.find((x) => x.id === m.to);
+    if (!c) return null;
+    const shop = state.shop.name, bal = Math.max(0, C.balance(state, c.id));
+    if (m.kind === 'reminder' && m.amount > 0)
+      return 'नमस्ते ' + c.name + '। ' + shop + ' से बोल रहे हैं। आपके खाते में ' + say(m.amount) + ' बाकी हैं। जब सुविधा हो, दुकान पर नकद या UPI से दे दीजिए। पैसे दे दिए हों तो "cash de diya" लिख दीजिए। धन्यवाद।';
+    if (m.kind === 'entry-check') {
+      const t = state.txns.find((x) => x.id === m.txnId);
+      if (!t) return null;
+      const items = (t.lines || []).filter((l) => l.price > 0).map((l) => l.name + (l.qty ? ' ' + l.qty + (l.unit ? ' ' + (UNIT_WORD[l.unit] || l.unit) : '') : '') + ', ' + say(l.price)).join('; ');
+      return 'नमस्ते ' + c.name + '। ' + shop + ' से। आज आपके खाते में ' + say(t.amount) + (t.type === 'credit' ? ' उधार' : ' जमा') + ' लिखे गए' + (items ? ': ' + items : '') +
+        '। कुल बाकी ' + say(bal) + '। सही है तो "हाँ" लिखिए, गलत हो तो "गलत"।';
+    }
+    return null;
+  }
+  async function speak(text) {
+    const r = await fetchImpl(tts.api + '/v1/text-to-speech/' + encodeURIComponent(tts.voice) + '?output_format=mp3_44100_128', {
+      method: 'POST', headers: { 'xi-api-key': tts.key, 'content-type': 'application/json', accept: 'audio/mpeg' },
+      body: JSON.stringify({ text, model_id: tts.model })
+    });
+    if (!r.ok) throw new Error('ElevenLabs HTTP ' + r.status);
+    return Buffer.from(await r.arrayBuffer());
+  }
+  function queueVoice(to, script) {
+    if (!stats.voiceNotes || !stats.sending || !script) return;
+    outQueue = outQueue.then(async () => {
+      try { const id = keepMedia(await speak(script)); stats.voiceSent = (stats.voiceSent || 0) + 1; await sendNow(to, '', publicUrl + '/media/' + id + '.mp3'); }
+      catch (e) { stats.voiceFailed = (stats.voiceFailed || 0) + 1; stats.lastError = String(e.message || e).slice(0, 200); }
+    });
+  }
 
   function payToken(state, custId) {
     if (!state.paySecret) state.paySecret = crypto.randomBytes(16).toString('hex');
@@ -90,7 +144,7 @@ function createWhatsapp(o) {
     for (const m of state.messages.slice(from)) {
       if (m.from !== 'agent' || (skipOwner && m.to === 'owner')) continue;
       const to = recipient(state, m.to);
-      if (to) queueSend(to, waText(state, m));
+      if (to) { queueSend(to, waText(state, m)); if (m.to !== 'owner') queueVoice(to, voiceScript(state, m)); }
     }
     const next = C.pendingClaims(state)[0];
     if (next && state.waAsked !== next.id && !skipOwner) {
@@ -217,7 +271,7 @@ function createWhatsapp(o) {
       (env.WA_JOIN_CODE ? '<p class="note">Jud jaane ke baad ek "hi" bhejiye. Aap is dukaan ke grahak ban jayenge.</p>' : '') + '<p class="note">' + esc(link) + '</p>');
   }
 
-  return { stats, verify, handle, deliver, payPage, joinPage, idle: () => outQueue };
+  return { stats, verify, handle, deliver, payPage, joinPage, getMedia, idle: () => outQueue };
 }
 
 module.exports = { createWhatsapp, twilioSignature, phone10 };

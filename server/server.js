@@ -188,7 +188,7 @@ function createServer(opts) {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, pageHtml(), 'text/html; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
       if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true, shop: shopId, llm: engine.llm, scheduler: env.REAL_CLOCK === '1', llmCalls: engine.llmCalls, llmFallbacks: engine.llmFallbacks,
-        whatsapp: { enabled: wa.stats.enabled, sending: wa.stats.sending, voice: wa.stats.stt, received: wa.stats.received, sent: wa.stats.sent, failed: wa.stats.failed, lastError: wa.stats.lastError } });
+        whatsapp: { enabled: wa.stats.enabled, sending: wa.stats.sending, voice: wa.stats.stt, voiceNotes: wa.stats.voiceNotes, received: wa.stats.received, sent: wa.stats.sent, failed: wa.stats.failed, lastError: wa.stats.lastError } });
       if (req.method === 'POST' && url.pathname === '/whatsapp') {
         if (!wa.stats.enabled) return send(res, 404, { error: 'not found' });
         let raw;
@@ -204,6 +204,12 @@ function createServer(opts) {
         const html = wa.payPage(state, decodeURIComponent(url.pathname.slice(5)));
         save(); // keeps the pay-link secret once made
         return html ? send(res, 200, html, 'text/html; charset=utf-8') : send(res, 404, { error: 'not found' });
+      }
+      if (req.method === 'GET' && /^\/media\/[0-9a-f]{24}\.mp3$/.test(url.pathname)) {
+        const buf = wa.getMedia(url.pathname.slice(7, 31));
+        if (!buf) return send(res, 404, { error: 'not found' });
+        res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': buf.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        return res.end(buf);
       }
       if (req.method === 'GET' && url.pathname === '/join') {
         const html = wa.joinPage(state);

@@ -23,10 +23,11 @@ function fakeFetch(opts) {
     url = String(url); calls.push({ url, init });
     if (url.includes('/Messages.json')) {
       const p = new URLSearchParams(init.body);
-      sent.push({ to: p.get('To'), body: p.get('Body') });
+      sent.push({ to: p.get('To'), body: p.get('Body'), media: p.get('MediaUrl') });
       return new Response('{}', { status: 201 });
     }
     if (url.includes('/Media/')) return new Response(Buffer.from('OggS fake audio'), { status: 200 });
+    if (url.includes('/v1/text-to-speech/')) return opts.ttsFail ? new Response('{}', { status: 401 }) : new Response(Buffer.from('ID3 fake mp3'), { status: 200 });
     if (url.endsWith('/audio/transcriptions')) return new Response(JSON.stringify({ text: opts.heard || '' }), { status: 200 });
     return new Response('{}', { status: 404 });
   };
@@ -217,4 +218,38 @@ test('short replies: one-word yes/no only, real sentences stay sentences', () =>
   for (const s of ['haan', 'Haan ji', 'sahi hai', '✅', 'हाँ', 'ok', 'mil gaya']) assert.equal(C.shortAnswer(s), 'yes', s);
   for (const s of ['galat hai', 'Galat', 'nahi', '❌', 'गलत', 'nahi mila']) assert.equal(C.shortAnswer(s), 'no', s);
   for (const s of ['cash de diya', 'kal dunga', 'Friday tak de dunga bhai pakka', '']) assert.equal(C.shortAnswer(s), null, s);
+});
+
+test('with ElevenLabs on, the customer also gets the bill as a Hindi voice note after the text; a failure leaves the text', async () => {
+  const { server, fetch: tw } = waServer({ ELEVENLABS_API_KEY: 'el-key' });
+  const base = await listen(server);
+  try {
+    await inbound(base, server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    tw.clear();
+    await inbound(base, server, { From: from(OWNER), Body: 'Rohit ji cheeni 2 kilo 90, tel 1 litre 180' });
+    const toJudge = tw.sent.filter((s) => s.to === 'whatsapp:' + JUDGE);
+    assert.match(toJudge[0].body, /Cheeni 2 kilo = ₹90/);
+    assert.ok(!toJudge[0].media);
+    const voice = toJudge[1];
+    assert.ok(voice && !voice.body && voice.media.startsWith(PUBLIC + '/media/'), 'the voice note follows the text');
+    const call = tw.calls.find((c) => c.url.includes('/v1/text-to-speech/'));
+    assert.equal(call.init.headers['xi-api-key'], 'el-key');
+    const said = JSON.parse(call.init.body);
+    assert.equal(said.model_id, 'eleven_multilingual_v2');
+    assert.match(said.text, /^नमस्ते Rohit। .* 270 रुपये उधार लिखे गए: cheeni 2 kilo, 90 रुपये; tel 1 litre, 180 रुपये/);
+    assert.ok(!tw.to(OWNER).some((b) => b == null), 'the owner gets no voice notes');
+    // Twilio fetches the audio from us; an unknown id is 404
+    const r = await fetch(base + voice.media.slice(PUBLIC.length));
+    assert.equal(r.status, 200); assert.equal(r.headers.get('content-type'), 'audio/mpeg');
+    assert.equal((await fetch(base + '/media/' + '0'.repeat(24) + '.mp3')).status, 404);
+  } finally { server.close(); }
+  const s2 = waServer({ ELEVENLABS_API_KEY: 'bad' }, { ttsFail: true });
+  const b2 = await listen(s2.server);
+  try {
+    await inbound(b2, s2.server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    await inbound(b2, s2.server, { From: from(OWNER), Body: 'Rohit 500 udhaar' });
+    assert.match(s2.fetch.to(JUDGE).join('\n'), /₹500 udhaar/);
+    assert.ok(!s2.fetch.sent.some((s) => s.media));
+    assert.match(s2.server.whatsapp.stats.lastError, /ElevenLabs HTTP 401/);
+  } finally { s2.server.close(); }
 });
