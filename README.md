@@ -117,6 +117,8 @@ SHOP=nayi node server/server.js
 
 `GET /healthz` shows `whatsapp.received / sent / failed` and the last Twilio error.
 
+**On Agent37** the instance cannot take environment variables, so put the keys in a file instead: `/home/node/udhaar.env`, one `KEY=value` per line (same names as above). The server reads it once at startup and logs only the names it read. A variable already set in the real environment wins over the file. Restart the instance after editing the file.
+
 ### Voice notes (Whisper on a GPU)
 
 Set `STT_URL` to any OpenAI-compatible speech-to-text server (`/audio/transcriptions`). `stt/whisper_server.py` is one: faster-whisper `large-v3` on a GPU, Hindi by default, nudged toward Hinglish in Roman letters. It is built for Nodus compute at the finale:

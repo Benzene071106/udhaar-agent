@@ -14,6 +14,9 @@
 //   VISION_MODEL           optional model id for reading copy photos (must accept images); unset = LLM_MODEL or router default
 //   OTHER_SHOPS            optional "Name|https://url,Name|https://url" for the shop switcher
 //   TWILIO_*, OWNER_WHATSAPP, PUBLIC_URL, STT_*   real WhatsApp and voice notes: see server/whatsapp.js
+//   UDHAAR_ENV_FILE        optional KEY=value file read once at startup (default /home/node/udhaar.env).
+//                          Agent37 cannot pass env vars to an instance, so keys go in this file instead.
+//                          A variable already set in the real environment wins over the file.
 //
 // Without the LLM variables, or when the LLM call fails, the offline Hinglish rule parser answers.
 'use strict';
@@ -273,9 +276,30 @@ function createServer(opts) {
   return server;
 }
 
-module.exports = { createServer };
+// Reads KEY=value lines (blank lines and # comments skipped, optional quotes stripped) into env,
+// without overriding variables that are already set. Returns the names it set; a missing file is fine.
+function loadEnvFile(file, env) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return []; }
+  const set = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] === '#') continue;
+    const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[2];
+    if (v.length >= 2 && (v[0] === '"' || v[0] === "'") && v[v.length - 1] === v[0]) v = v.slice(1, -1);
+    if (env[m[1]] === undefined || env[m[1]] === '') { env[m[1]] = v; set.push(m[1]); }
+  }
+  return set;
+}
+
+module.exports = { createServer, loadEnvFile };
 
 if (require.main === module) {
+  const envFile = process.env.UDHAAR_ENV_FILE || '/home/node/udhaar.env';
+  const fromFile = loadEnvFile(envFile, process.env);
+  if (fromFile.length) console.log('Read ' + fromFile.length + ' setting(s) from ' + envFile + ': ' + fromFile.join(', '));
   const port = +process.env.PORT || 8000;
   createServer().listen(port, '0.0.0.0', () => {
     console.log('Udhaar Agent (' + (process.env.SHOP || 'gupta') + ') on :' + port + ', LLM ' + (process.env.AGENT37_LLM_PROXY_URL ? 'via router' : 'off (rules only)'));
