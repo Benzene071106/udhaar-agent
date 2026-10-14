@@ -486,3 +486,49 @@ test('Devanagari bill', () => {
   const t = s.txns[s.txns.length - 1];
   assert.strictEqual(t.amount, 310); assert.strictEqual(t.lines.length, 3);
 });
+
+// ---------------- counter bill: the owner's talk with the helper becomes the bill
+const counterRun = (shop, text) => {
+  const st = C.freshShop(shop, '2026-10-08');
+  const n = st.messages.length;
+  C.runAction(st, 'owner', { text, source: 'voice' });
+  return { st, out: st.messages.slice(n).filter((m) => m.from === 'agent'), t: st.txns[st.txns.length - 1] };
+};
+test('counter talk: items called to the helper, the total said aloud, the helper never becomes the customer', () => {
+  const { out, t } = counterRun('gupta', 'Aaiye Iqbal bhai. Raju, do kilo atta la, ek litre tel bhi nikal, maggi do. Kitna hua? 290');
+  const iqbal = out.find((m) => m.to !== 'owner');
+  assert.strictEqual(t.amount, 290, 'the spoken total wins');
+  assert.strictEqual(t.via, 'counter'); assert.strictEqual(t.spokenTotal, 290);
+  assert.deepStrictEqual(t.lines.map((l) => [l.name, l.qty, l.price]), [['atta', 2, 84], ['tel', 1, 180], ['maggi', 2, 28], ['chhoot', null, -2]]);
+  assert.match(out[0].text, /^🧾 Dukaan ki baat se bill/);
+  assert.match(out[0].text, /⚠️ Items ka jod ₹292, bola gaya total ₹290/);
+  assert.ok(iqbal && /Atta 2 kilo = ₹84/.test(iqbal.text), 'the customer gets the same item-wise bill to check');
+  assert.ok(!/raju/i.test(JSON.stringify(t.lines)), 'the helper is not an item');
+});
+test('counter talk: number words, a matching total, and a name said only at the end', () => {
+  const st = C.freshShop('nayi', '2026-10-08');
+  C.runAction(st, 'owner', { text: 'Sharma ji ne cheeni 2 kilo 90, tel 1 litre 180, sabun 40 liya' });
+  const n = st.messages.length;
+  C.runAction(st, 'owner', { text: 'Raju, do kilo cheeni la. Ek litre tel bhi nikal. Sabun do. Aur kuch? Bas. Kitna hua Raju? Teen sau das. Sharma ji ke khate mein likh do.' });
+  const t = st.txns[st.txns.length - 1];
+  assert.strictEqual(t.amount, 310);
+  assert.strictEqual(st.customers.find((c) => c.id === t.custId).name, 'Sharma ji');
+  assert.deepStrictEqual(t.lines.map((l) => l.price), [90, 180, 80, -40]);
+  assert.match(st.messages.slice(n).find((m) => m.to === 'owner').text, /Items ka jod ₹350, bola gaya total ₹310/);
+});
+test('counter talk with no name asks whose khata, and a bare name finishes it', () => {
+  const st = C.freshShop('gupta', '2026-10-08');
+  const before = st.txns.length;
+  C.runAction(st, 'owner', { text: 'Raju ek kilo cheeni la, tel bhi. Kitna hua? 225' });
+  assert.strictEqual(st.txns.length, before, 'nothing written before the owner says whose');
+  assert.match(st.messages[st.messages.length - 1].text, /Kiske khate mein likhun/);
+  C.runAction(st, 'owner', { text: 'Pappu' });
+  const t = st.txns[st.txns.length - 1];
+  assert.strictEqual(st.customers.find((c) => c.id === t.custId).name, 'Pappu');
+  assert.strictEqual(t.amount, 225);
+  assert.match(st.messages.filter((m) => m.to === 'owner').pop().text, /👍 Items ka jod bole gaye total ₹225 se milta hai/);
+});
+test('a dictated entry is not counter talk', () => {
+  for (const s of ['Sharma ji ne 340 ka saaman liya, kal denge', 'Pappu 200 cash', 'Sharma ji cheeni 2 kilo 90, tel 180']) assert.strictEqual(C.looksLikeCounter(s), false, s);
+  for (const s of ['Raju do kilo cheeni la', 'kitna hua? 310', 'tel nikal']) assert.strictEqual(C.looksLikeCounter(s), true, s);
+});

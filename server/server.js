@@ -69,7 +69,7 @@ function createServer(opts) {
   // The token is read at call time: Agent37 issues a new one whenever the sandbox restarts.
   async function understand(text) {
     const rules = C.parseOwnerMessage(text, state.today);
-    if (!llmUrl || rules.intent === 'choice' || C.looksLikeUpiSms(text)) return rules;
+    if (!llmUrl || rules.intent === 'choice' || C.looksLikeUpiSms(text) || C.looksLikeCounter(text)) return rules; // counter talk has its own parser
     const p = C.llmRequestParts(text, state);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);

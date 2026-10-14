@@ -397,7 +397,7 @@
     }
     const sum = lines.reduce((s, l) => s + l.price, 0);
     // a remembered rate never overrides what the owner just said: if the total doesn't match, keep it a single amount
-    if (total != null && Math.round(total - sum) && lines.some((l) => l.from === 'memory')) return null;
+    if (total != null && Math.round(total - sum) && lines.some((l) => l.from === 'memory') && !intent.counter) return null;
     if (total != null && Math.round(total - sum)) lines.push({ name: total > sum ? 'baaki saaman' : 'chhoot', qty: null, unit: null, price: Math.round(total - sum), from: 'extra' });
     return { lines, amount: total != null ? total : sum };
   }
@@ -420,6 +420,109 @@
   }
   /** The shop's remembered rates, newest first (shown on the dashboard). */
   const rateList = (state) => Object.keys(prices(state)).map((k) => Object.assign({ key: k }, prices(state)[k])).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.name < b.name ? -1 : 1));
+
+
+  // ------------------------------------------- counter bill: the shop's own talk becomes the bill
+  // At the counter the owner calls items out to a helper ("Raju, do kilo cheeni la, ek tel bhi nikal") and someone
+  // says the total aloud at the end ("kitna hua? 310"). The owner holds the WhatsApp mic through that, and the agent
+  // keeps only the bill: items, rates, the spoken total, and whether the two agree. Nothing else is kept.
+  const HELPER_VERB = new Set(['la', 'lao', 'laa', 'laao', 'lana', 'nikal', 'nikalo', 'nikaal', 'nikalna', 'utha', 'uthao', 'rakh', 'rakho', 'pack', 'tol', 'tolo', 'bandh', 'bandho'].map(normWord));
+  const COUNTER_FILLER = new Set(['bhi', 'kuch', 'bas', 'aur', 'aiye', 'aaiye', 'aao', 'aa', 'suno', 'dekho', 'chalo', 'jaldi', 'jao', 'ja', 'le', 'leke', 'lekar', 'de', 'na', 'nahi', 'haan', 'han', 'theek', 'thik', 'sahi', 'ho', 'gaya', 'gaye', 'hua', 'hue', 'hai', 'hain', 'ke', 'ka', 'ki', 'ko', 'khate', 'khata', 'mein', 'me', 'likh', 'likho', 'likhna', 'likhdo', 'kar', 'karo', 'kardo', 'diya', 'dedo', 'dijiye', 'dijie', 'dena', 'rs', 'rupaye', 'rupaya', 'rupe', 'rupees'].map(normWord));
+  const TOTAL_CUE = new Set(['kitna', 'kitana', 'kitne', 'kitni', 'total', 'kul', 'jod', 'hisab', 'bill', 'bil'].map(normWord));
+  // "tin sau das" → 310, "dhai sau" → 250, "sadhe tin sau" → 350; digits as they are
+  function numberAt(n, i) {
+    if (isNum(n[i])) { let v = parseFloat(n[i]), j = i; if (MULT[n[i + 1]]) { v *= MULT[n[i + 1]]; j++; } return { v, end: j }; }
+    let v = 0, cur = 0, j = i, any = false, half = 0;
+    for (; j < n.length; j++) {
+      const w = n[j];
+      if (w === 'sade' || w === 'sadhe') { half = 0.5; continue; }
+      if (w === 'dedh') { cur = 1.5; any = true; continue; }
+      if (w === 'dhai') { cur = 2.5; any = true; continue; }
+      if (NUMWORDS[w] != null) { cur += NUMWORDS[w]; any = true; continue; }
+      if (isNum(w)) { cur += parseFloat(w); any = true; continue; }
+      if (MULT[w] && any) { v += (cur + half) * MULT[w]; cur = 0; half = 0; continue; }
+      break;
+    }
+    return any ? { v: v + cur, end: j - 1 } : null;
+  }
+  /** Does this sound like counter talk (items called to a helper, or a total asked aloud) rather than a dictated entry? */
+  function looksLikeCounter(text) {
+    const n = tokenize(text).norm;
+    const helper = n.some((w) => HELPER_VERB.has(w));
+    const asked = n.some((w, i) => /^(kitna|kitana|kitne)$/.test(w) && /^(hua|hue|huwa|ho)$/.test(n[i + 1] || ''));
+    return helper || asked;
+  }
+  function counterIntent(state, text) {
+    const tok = tokenize(String(text).replace(/[.?!।|]+/g, ', '));
+    const n = tok.norm.slice(), d = tok.display.slice();
+    const skip = new Set();
+    // the total said aloud: the last "kitna hua? 310" / "total 310" / "310 hue"
+    let total = null;
+    for (let i = 0; i < n.length; i++) {
+      if (TOTAL_CUE.has(n[i])) {
+        for (let j = i + 1; j < Math.min(n.length, i + 7); j++) {
+          const x = numberAt(n, j);
+          if (x && !UNIT_OF[n[x.end + 1]]) { total = x.v; for (let k = i; k <= x.end; k++) skip.add(k); i = x.end; break; }
+          if (x || UNIT_OF[n[j]]) break; // a quantity, not the total
+        }
+      } else {
+        const x = numberAt(n, i);
+        if (x && /^(hua|hue|huwa|ho)$/.test(n[x.end + 1] || '') && !UNIT_OF[n[i - 1]]) { total = x.v; for (let k = i; k <= x.end + 1; k++) skip.add(k); i = x.end + 1; }
+      }
+    }
+    // who it is for: a khata name in the talk. A name that only gets orders ("Raju, cheeni la") is the helper.
+    const clauseHasHelper = (i) => {
+      for (let j = i + 1; j < n.length && n[j] !== 'aur'; j++) if (HELPER_VERB.has(n[j])) return true;
+      return false;
+    };
+    const cand = new Map();
+    for (let i = 0; i < n.length; i++) {
+      for (const c of state.customers) {
+        const kw = c.key.split(' ');
+        if (n.slice(i, i + kw.length).join(' ') !== c.key && !(kw[0].length >= 3 && n[i] === kw[0] && !prices(state)[n[i]])) continue;
+        const len = n.slice(i, i + kw.length).join(' ') === c.key ? kw.length : 1;
+        let score = 1;
+        const after = n.slice(i + len, i + len + 4).join(' ');
+        if (HONORIFICS.has(n[i + len])) score += 2;
+        if (/^(ji |bhai |didi |bhabhi |aunty )?(ke|ka|ki) (khate|khata|naam|nam)|^(ji )?(ko|ke liye|ka bill|ka saman|ka saaman)/.test(after)) score += 3;
+        if (!HONORIFICS.has(n[i + len]) && clauseHasHelper(i + len - 1)) score -= 5;
+        const prev = cand.get(c.id);
+        cand.set(c.id, { c, score: (prev ? Math.max(prev.score, score) : score), at: (prev ? prev.at : []).concat([[i, len]]) });
+      }
+    }
+    // "Raju do kilo cheeni la": the first word of an order, before the quantity, is the helper being addressed
+    for (let i = 0; i < n.length; i++) {
+      if ((i === 0 || n[i - 1] === 'aur') && /^[a-z]{3,}$/.test(n[i]) && !prices(state)[n[i]] && !UNIT_OF[n[i + 1]] &&
+        (isNum(n[i + 1]) || NUMWORDS[n[i + 1]] != null || n[i + 1] === 'dedh' || n[i + 1] === 'adha') && clauseHasHelper(i)) skip.add(i);
+    }
+    const ranked = [...cand.values()].filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+    const cust = ranked.length && (ranked.length === 1 || ranked[0].score > ranked[1].score) ? ranked[0].c : null;
+    // no khata yet: a name said with respect ("Verma ji") is the customer; a helper gets orders, not "ji"
+    let newName = null;
+    if (!cust && !ranked.length) {
+      for (let i = 0; i < n.length && !newName; i++) {
+        if (HONORIFICS.has(n[i + 1]) && /^[a-z]{3,}$/.test(n[i]) && isItemWord(n[i]) && !prices(state)[n[i]] && !UNIT_OF[n[i]]) {
+          newName = { name: prettyName([d[i], d[i + 1]]), key: nameKey([n[i]]) }; skip.add(i); skip.add(i + 1);
+          for (let j = i + 2; j < n.length; j++) if (n[j] === n[i]) { skip.add(j); if (HONORIFICS.has(n[j + 1])) skip.add(j + 1); }
+        }
+      }
+    }
+    for (const x of cand.values()) for (const [i, len] of x.at) for (let k = i; k < i + len + (HONORIFICS.has(n[i + len]) ? 1 : 0); k++) skip.add(k);
+    const counts = {};
+    for (let i = 0; i < n.length; i++) {
+      if (HELPER_VERB.has(n[i]) || COUNTER_FILLER.has(n[i]) && n[i] !== 'aur') skip.add(i);
+      // "sabun do" at the end of a clause is two soaps
+      if (NUMWORDS[n[i]] != null && isItemWord(n[i - 1]) && !skip.has(i - 1) && (!n[i + 1] || n[i + 1] === 'aur' || HELPER_VERB.has(n[i + 1]))) { counts[n[i - 1]] = NUMWORDS[n[i]]; skip.add(i); }
+    }
+    const lp = parseLines({ norm: n, display: d }, skip);
+    for (const l of lp.lines) { const k = l.key.split(' ').pop(); if (counts[k] && l.price == null && l.qty == null) l.qty = counts[k]; }
+    // a word on its own with no amount, quantity or remembered rate is chatter, not an item
+    lp.lines = lp.lines.filter((l) => l.price != null || l.qty != null || prices(state)[l.key]);
+    lp.total = total; lp.loose = [];
+    const who = cust ? { name: cust.name, key: cust.key } : newName || { name: null, key: null };
+    return { intent: 'credit', counter: { total, heard: String(text).slice(0, 500) }, lineParse: lp, name: who.name, nameKey: who.key,
+      amount: total, items: '', dueDate: null, raw: text, parser: 'rules' };
+  }
 
   // -------------------------------------------------------------- parse
   /** Rule-based parser. Returns an intent object; an LLM parser should return the same shape. */
@@ -515,6 +618,19 @@
       if (intent.intent === 'choice' && intent.choice >= 1 && intent.choice <= p.options.length) chosen = p.options[intent.choice - 1];
       else if (intent.nameKey) { const f = findCustomers(state, intent.nameKey).filter((c) => p.options.includes(c.id)); if (f.length === 1) chosen = f[0].id; }
       if (intent.intent === 'choice' && p.allowNew && intent.choice === p.options.length + 1) chosen = '__new__';
+      if (p.type === 'counter' && intent.nameKey) {
+        const f = findCustomers(state, intent.nameKey);
+        state.pending = null;
+        if (f.length > 1) {
+          state.pending = { type: 'action', options: f.map((c) => c.id), action: Object.assign({}, p.action, { name: intent.name, nameKey: intent.nameKey }), allowNew: true };
+          reply('Kaun se ' + intent.name + '?\n' + f.map((c, i) => (i + 1) + '. ' + c.name + ' (baaki ' + rupees(balance(state, c.id)) + ')').join('\n') + '\n' + (f.length + 1) + '. Naya khata\nNumber bhejiye.');
+          return out;
+        }
+        else {
+          const c = f[0] || addCustomer(state, intent.name, intent.nameKey);
+          return out.concat(execute(state, Object.assign({}, p.action, { name: c.name, nameKey: c.key }), c, reply));
+        }
+      }
       if (chosen) {
         state.pending = null;
         if (p.type === 'upi') return out.concat(settleUpi(state, p.upi, getCust(state, chosen), 'owner-confirmed'));
@@ -561,6 +677,11 @@
     }
 
     // customer-specific intents
+    if (!intent.nameKey && intent.counter && intent.amount > 0) {
+      state.pending = { type: 'counter', options: [], action: intent, allowNew: true };
+      reply('🧾 Bill bana, ' + rupees(intent.amount) + (intent.lines ? ':\n' + billText(intent.lines) : '') + '\nKiske khate mein likhun? Bas naam boliye, jaise "Sharma ji".', { kind: 'counter-ask' });
+      return out;
+    }
     if (!intent.nameKey) { reply('Kiska khata? Naam ke saath boliye, jaise "Sharma ji ne 340 ka saaman liya".'); return out; }
     const matches = findCustomers(state, intent.nameKey);
     if (matches.length > 1) {
@@ -592,11 +713,17 @@
         cust.dueDate = due; cust.reminderLevel = 0; cust.lastReminder = null;
         state.lastAction = { txnId: tx.id };
         log(state, 'credit', cust.name + ' +' + rupees(intent.amount) + ' (due ' + fmtDate(due) + ')');
-        let text = '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' +
+        const ct = intent.counter;
+        if (ct) { tx.via = 'counter'; tx.spokenTotal = ct.total; }
+        const said = ct && ct.total != null && tx.lines ? ct.total : null;
+        const heardSum = said != null ? tx.lines.filter((l) => l.from !== 'extra').reduce((a, l) => a + l.price, 0) : null;
+        let text = (ct ? '🧾 Dukaan ki baat se bill. ' : '') + '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' +
           (tx.lines ? ':\n' + billText(tx.lines) + (remembered.length ? '\n🧠 Daam yaad se: ' + remembered.map((l) => l.name + ' ' + rateText(l.rate, l.rateUnit)).join(', ') : '') +
             (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko bhej di, woh "Haan / Galat" se check karenge.' : '')
             : (intent.items ? ' (' + intent.items + ')' : '') + '.') + '\nKul baaki: ' + rupees(balance(state, cust.id)) + '\n📅 ' +
           (intent.dueDate ? 'Wada: ' + fmtDay(due) + '. Usi din yaad dila dunga.' : fmtDay(due) + ' ko yaad dila dunga (koi tareekh nahi boli thi).');
+        if (said != null && Math.round(said - heardSum)) text += '\n⚠️ Items ka jod ' + rupees(heardSum) + ', bola gaya total ' + rupees(said) + '. ' + rupees(said) + ' likha. Galat ho toh "galti" boliye.';
+        else if (said != null) text += '\n👍 Items ka jod bole gaye total ' + rupees(said) + ' se milta hai.';
         if (!cust.phone) text += '\n📱 ' + cust.name + ' ka WhatsApp number bhej dijiye, reminder ke liye. Jaise: "' + cust.name + ' ka number 98xxxxxxxx"';
         reply(text);
         break;
@@ -650,10 +777,15 @@
   function handleOwnerMessage(state, text, opts) {
     opts = opts || {};
     recordOwnerMessage(state, text, opts.source);
-    const intent = opts.intent || parseOwnerMessage(text, state.today);
+    let intent = opts.intent || parseOwnerMessage(text, state.today);
+    if (!state.pending && looksLikeCounter(text)) intent = counterIntent(state, text);
     intent.source = opts.source || 'text';
     intent.raw = text;
     const bill = itemize(state, intent, text);
+    if (intent.counter && !(bill && bill.lines)) {
+      if (intent.counter.total > 0) intent.lines = null; // no items heard: the spoken total alone
+      else { intent = parseOwnerMessage(text, state.today); intent.source = opts.source || 'text'; intent.raw = text; }
+    }
     if (bill && bill.lines) {
       intent.intent = 'credit'; intent.amount = bill.amount; intent.lines = bill.lines;
       intent.items = bill.lines.filter((l) => l.from !== 'extra').map((l) => l.name + (qtyText(l) ? ' ' + qtyText(l) : '')).join(', ');
@@ -1638,6 +1770,7 @@
     // shared action layer
     runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
     // real WhatsApp channel
+    looksLikeCounter, counterIntent,
     customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),
     // item lines + rate memory
     itemize, learnRates, rateList, billText,
