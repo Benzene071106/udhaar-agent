@@ -193,11 +193,12 @@ function createServer(opts) {
       if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true, shop: shopId, llm: engine.llm, scheduler: env.REAL_CLOCK === '1', llmCalls: engine.llmCalls, llmFallbacks: engine.llmFallbacks,
         whatsapp: { enabled: wa.stats.enabled, sending: wa.stats.sending, voice: wa.stats.stt, voiceNotes: wa.stats.voiceNotes, received: wa.stats.received, sent: wa.stats.sent, failed: wa.stats.failed, lastError: wa.stats.lastError } });
       if (req.method === 'POST' && url.pathname === '/whatsapp') {
-        if (!wa.stats.enabled) return send(res, 404, { error: 'not found' });
+        if (!wa.stats.enabled) { console.log('whatsapp webhook: hit while WhatsApp is off'); return send(res, 404, { error: 'not found' }); }
         let raw;
         try { raw = await readBody(req); } catch (e) { return send(res, 413, { error: 'body too large' }); }
         const params = Object.fromEntries(new URLSearchParams(raw));
-        if (!wa.verify(req, params)) return send(res, 403, { error: 'bad signature' });
+        if (!wa.verify(req, params)) { console.log('whatsapp webhook: bad signature (url ' + (req.headers['x-forwarded-proto'] || '') + '://' + req.headers.host + req.url + ')'); return send(res, 403, { error: 'bad signature' }); }
+        console.log('whatsapp webhook: message ' + String(params.MessageSid || '').slice(0, 8) + '… accepted');
         // Answer Twilio at once; replies go out through the API, so a slow voice note never times the webhook out.
         send(res, 200, '<?xml version="1.0" encoding="UTF-8"?><Response></Response>', 'text/xml');
         serial(() => wa.handle(params, act, () => state, save)).then(() => save(), (e) => { wa.stats.lastError = String(e.message || e).slice(0, 200); });
