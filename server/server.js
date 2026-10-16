@@ -13,6 +13,15 @@
 //                          and at EVENING_HOUR (default 21) it sends the evening summary and cash batch
 //   VISION_MODEL           optional model id for reading copy photos (must accept images); unset = LLM_MODEL or router default
 //   OTHER_SHOPS            optional "Name|https://url,Name|https://url" for the shop switcher
+//   TWILIO_*, OWNER_WHATSAPP, PUBLIC_URL, STT_*   real WhatsApp and voice notes: see server/whatsapp.js
+//   ACT_LIMIT_PER_MIN      default 30: /api/act calls per minute per visitor IP (the public demo URL is open to anyone)
+//   PHOTO_LIMIT_PER_10MIN  default 5: /api/photo calls per 10 minutes per visitor IP (each one is an AI vision call)
+//   ADMIN_KEY              optional: on a live shop (REAL_CLOCK=1) "reset", "next day" and "close day" from the public page
+//                          need the header x-admin-key with this value; calls from the instance itself always work
+//   WA_REPLY_TWIML         1 = answer the WhatsApp sender inside the webhook reply (TwiML) instead of the Messages API
+//   UDHAAR_ENV_FILE        optional KEY=value file read once at startup (default /home/node/udhaar.env).
+//                          Agent37 cannot pass env vars to an instance, so keys go in this file instead.
+//                          A variable already set in the real environment wins over the file.
 //
 // Without the LLM variables, or when the LLM call fails, the offline Hinglish rule parser answers.
 'use strict';
@@ -20,6 +29,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const C = require('../core/agent-core.js');
+const { createWhatsapp } = require('./whatsapp.js');
 
 const ROOT = path.join(__dirname, '..');
 const MAX_BODY = 16 * 1024;
@@ -61,12 +71,13 @@ function createServer(opts) {
     fs.renameSync(tmp, file);
   }
 
+  const wa = createWhatsapp({ env, fetch: fetchImpl });
   const engine = { llm: !!llmUrl, model: model || 'router default', lastError: null, llmCalls: 0, llmFallbacks: 0 };
 
   // The token is read at call time: Agent37 issues a new one whenever the sandbox restarts.
   async function understand(text) {
     const rules = C.parseOwnerMessage(text, state.today);
-    if (!llmUrl || rules.intent === 'choice' || C.looksLikeUpiSms(text)) return rules;
+    if (!llmUrl || rules.intent === 'choice' || C.looksLikeUpiSms(text) || C.looksLikeCounter(text)) return rules; // counter talk has its own parser
     const p = C.llmRequestParts(text, state);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -134,7 +145,7 @@ function createServer(opts) {
   function snapshot(extra) {
     return Object.assign({
       state, dashboard: C.dashboard(state, 30), shopId,
-      engine: { llm: engine.llm, model: engine.model, lastError: engine.lastError },
+      engine: { llm: engine.llm, model: engine.model, lastError: engine.lastError, whatsapp: wa.stats.enabled },
       others
     }, extra || {});
   }
@@ -179,19 +190,87 @@ function createServer(opts) {
     return snapshot({ freshTxn: out.freshTxn, result: out.result });
   }
 
+  // A small per-visitor rate limit for the routes that change the khata or spend AI calls. The page itself stays open
+  // (it is a public demo); this only stops one visitor from hammering the shop. Local calls (no proxy) are not limited.
+  const limits = { '/api/act': [+env.ACT_LIMIT_PER_MIN || 30, 60e3], '/api/photo': [+env.PHOTO_LIMIT_PER_10MIN || 5, 600e3] };
+  const hits = new Map();
+  const LOCKED = new Set(['reset', 'nextDay', 'closeDay']);
+  const local = (req) => !req.headers['x-forwarded-for'] && /^(::1|127\.|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+  const sameKey = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b)); return x.length === y.length && require('crypto').timingSafeEqual(x, y); };
+  function limited(req, route) {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const ip = fwd || req.socket.remoteAddress || '';
+    if (!fwd && /^(::1|127\.|::ffff:127\.)/.test(ip)) return false;
+    const [max, windowMs] = limits[route], key = route + ' ' + ip, now = Date.now();
+    const recent = (hits.get(key) || []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) { hits.set(key, recent); return true; }
+    recent.push(now); hits.set(key, recent);
+    if (hits.size > 5000) hits.clear();
+    return false;
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://x');
+      if (req.method === 'POST' && limits[url.pathname] && limited(req, url.pathname)) return send(res, 429, { error: 'too many requests, try again in a minute' });
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, pageHtml(), 'text/html; charset=utf-8');
       if (req.method === 'GET' && url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
-      if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true, shop: shopId, llm: engine.llm, scheduler: env.REAL_CLOCK === '1', llmCalls: engine.llmCalls, llmFallbacks: engine.llmFallbacks });
+      if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true, shop: shopId, llm: engine.llm, scheduler: env.REAL_CLOCK === '1', llmCalls: engine.llmCalls, llmFallbacks: engine.llmFallbacks,
+        whatsapp: { enabled: wa.stats.enabled, sending: wa.stats.sending, voice: wa.stats.stt, voiceNotes: wa.stats.voiceNotes, received: wa.stats.received, sent: wa.stats.sent, failed: wa.stats.failed, lastError: wa.stats.lastError } });
+      if (req.method === 'POST' && url.pathname === '/whatsapp') {
+        if (!wa.stats.enabled) { console.log('whatsapp webhook: hit while WhatsApp is off'); return send(res, 404, { error: 'not found' }); }
+        let raw;
+        try { raw = await readBody(req); } catch (e) { return send(res, 413, { error: 'body too large' }); }
+        const params = Object.fromEntries(new URLSearchParams(raw));
+        if (!wa.verify(req, params)) { console.log('whatsapp webhook: bad signature (url ' + (req.headers['x-forwarded-proto'] || '') + '://' + req.headers.host + req.url + ')'); return send(res, 403, { error: 'bad signature' }); }
+        console.log('whatsapp webhook: message ' + String(params.MessageSid || '').slice(0, 8) + '… accepted');
+        if (env.WA_REPLY_TWIML !== '1') {
+          // Answer Twilio at once; replies go out through the API, so a slow voice note never times the webhook out.
+          send(res, 200, wa.twiml([]), 'text/xml');
+          serial(() => wa.handle(params, act, () => state, save)).then(() => save(), (e) => { wa.stats.lastError = String(e.message || e).slice(0, 200); });
+          return;
+        }
+        // WA_REPLY_TWIML=1 (Sandbox on newer accounts): the sender's answer goes back in this webhook's TwiML (Twilio
+        // waits 15 s); messages for anyone else, and anything later than 12 s, go out through the Messages API.
+        let reply = Promise.resolve([]);
+        const job = serial(() => { const h = wa.handleForReply(params, act, () => state, save, +env.WA_REPLY_WAIT_MS || 12000); reply = h.replied; return h.done; });
+        job.then(() => save(), (e) => { wa.stats.lastError = String(e.message || e).slice(0, 200); });
+        const msgs = await Promise.race([job.then(() => reply, () => reply), new Promise((r) => setTimeout(r, (+env.WA_REPLY_WAIT_MS || 12000) + 500)).then(() => reply)]);
+        return send(res, 200, wa.twiml(msgs), 'text/xml');
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/pay/')) {
+        const html = wa.payPage(state, decodeURIComponent(url.pathname.slice(5)));
+        save(); // keeps the pay-link secret once made
+        return html ? send(res, 200, html, 'text/html; charset=utf-8') : send(res, 404, { error: 'not found' });
+      }
+      if (req.method === 'GET' && /^\/media\/[0-9a-f]{24}\.mp3$/.test(url.pathname)) {
+        const buf = wa.getMedia(url.pathname.slice(7, 31));
+        if (!buf) return send(res, 404, { error: 'not found' });
+        res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': buf.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        return res.end(buf);
+      }
+      if (req.method === 'GET' && url.pathname === '/join') {
+        const html = wa.joinPage(state);
+        return html ? send(res, 200, html, 'text/html; charset=utf-8') : send(res, 404, { error: 'not found' });
+      }
       if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, snapshot());
       if (req.method === 'POST' && url.pathname === '/api/act') {
         if (!/application\/json/.test(req.headers['content-type'] || '')) return send(res, 415, { error: 'send JSON' });
         if (+req.headers['content-length'] > MAX_BODY) { res.setHeader('connection', 'close'); return send(res, 413, { error: 'body too large' }); }
         let body;
         try { body = JSON.parse(await readBody(req) || '{}'); } catch (e) { return send(res, e.code === 413 ? 413 : 400, { error: e.code === 413 ? 'body too large' : 'bad JSON' }); }
-        const out = await serial(() => act(String(body.action || ''), body.args || {}));
+        const action = String(body.action || '');
+        // a live shop's khata and clock belong to the shop: a visitor on the public link can try everything else,
+        // but cannot wipe the khata or move its day
+        if (LOCKED.has(action) && env.REAL_CLOCK === '1' && !local(req) && !(env.ADMIN_KEY && sameKey(req.headers['x-admin-key'], env.ADMIN_KEY)))
+          return send(res, 403, { error: 'locked', message: 'Yeh asli dukaan ka khata hai: "' + (action === 'reset' ? 'Demo dobara shuru' : action === 'nextDay' ? 'Agle din' : 'Dukaan band') + '" yahan band hai. Baaki sab aazmaiye 🙏' });
+        const out = await serial(async () => {
+          const from = state.messages.length, before = state;
+          const r = await act(action, body.args || {});
+          // customers on WhatsApp get what the owner did on the web page; the owner already sees it here
+          if (state === before) { wa.deliver(state, from, null, { skipOwner: true }); save(); }
+          return r;
+        });
         return send(res, 200, out);
       }
       if (req.method === 'POST' && url.pathname === '/api/photo') {
@@ -219,9 +298,10 @@ function createServer(opts) {
     const ran = [];
     return serial(() => {
       const now = today();
+      const from = state.messages.length;
       for (let i = 0; i < 31 && state.today < now; i++) { C.runAction(state, 'nextDay'); ran.push('nextDay'); }
       if (hourNow() >= evening && state.eveningSentFor !== state.today && state.today === now) { C.runAction(state, 'closeDay'); ran.push('closeDay'); }
-      if (ran.length) save();
+      if (ran.length) { wa.deliver(state, from); save(); }
       return ran;
     });
   }
@@ -230,12 +310,35 @@ function createServer(opts) {
   server.tick = tick;
   server.getState = () => state;
   server.engine = engine;
+  server.whatsapp = wa;
+  server.idle = () => queue.then(() => wa.idle());
   return server;
 }
 
-module.exports = { createServer };
+// Reads KEY=value lines (blank lines and # comments skipped, optional quotes stripped) into env,
+// without overriding variables that are already set. Returns the names it set; a missing file is fine.
+function loadEnvFile(file, env) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return []; }
+  const set = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] === '#') continue;
+    const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[2];
+    if (v.length >= 2 && (v[0] === '"' || v[0] === "'") && v[v.length - 1] === v[0]) v = v.slice(1, -1);
+    if (env[m[1]] === undefined || env[m[1]] === '') { env[m[1]] = v; set.push(m[1]); }
+  }
+  return set;
+}
+
+module.exports = { createServer, loadEnvFile };
 
 if (require.main === module) {
+  const envFile = process.env.UDHAAR_ENV_FILE || '/home/node/udhaar.env';
+  const fromFile = loadEnvFile(envFile, process.env);
+  if (fromFile.length) console.log('Read ' + fromFile.length + ' setting(s) from ' + envFile + ': ' + fromFile.join(', '));
   const port = +process.env.PORT || 8000;
   createServer().listen(port, '0.0.0.0', () => {
     console.log('Udhaar Agent (' + (process.env.SHOP || 'gupta') + ') on :' + port + ', LLM ' + (process.env.AGENT37_LLM_PROXY_URL ? 'via router' : 'off (rules only)'));

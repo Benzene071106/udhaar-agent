@@ -5,7 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createServer } = require('../server/server.js');
+const { createServer, loadEnvFile } = require('../server/server.js');
 
 const TODAY = '2026-10-08';
 fs.existsSync(path.join(__dirname, '../dist/udhaar-agent-standalone.html')) || require('../build.js');
@@ -189,6 +189,7 @@ test('the Dockerfile builds the page and serves port 8000', () => {
   assert.match(df, /RUN node build\.js/);
   assert.match(df, /EXPOSE 8000/);
   assert.match(df, /REAL_CLOCK=1/);
+  assert.match(df, /DATA_DIR=\/home\/node\/data/, 'khata lives on the persistent mount');
   assert.match(df, /CMD \["node", "server\/server\.js"\]/);
   for (const f of ['core', 'web', 'vendor', 'server', 'build.js']) assert.ok(df.includes('COPY ' + f), f);
 });
@@ -225,4 +226,47 @@ test('copy photo over HTTP: the server asks its own AI, proposes lines, writes o
     const r = await fetch(u2 + '/api/photo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: img }) });
     assert.equal(r.status, 409); assert.deepEqual(await r.json(), { error: 'no_ai' });
   } finally { s2.close(); }
+});
+
+test('loadEnvFile fills unset variables from a KEY=value file and never overrides real env', () => {
+  const file = path.join(tmpDir(), 'udhaar.env');
+  fs.writeFileSync(file, '# keys\n\nTWILIO_ACCOUNT_SID=AC123\nexport OWNER_WHATSAPP="+91 98765 00000"\nSTT_URL=\'https://stt.example\'\nPORT=9999\nnot a line\nEMPTY_ONE=\n');
+  const env = { PORT: '8000', STT_URL: '' };
+  const set = loadEnvFile(file, env);
+  assert.strictEqual(env.TWILIO_ACCOUNT_SID, 'AC123');
+  assert.strictEqual(env.OWNER_WHATSAPP, '+91 98765 00000');
+  assert.strictEqual(env.STT_URL, 'https://stt.example');
+  assert.strictEqual(env.PORT, '8000');
+  assert.strictEqual(env.EMPTY_ONE, '');
+  assert.deepStrictEqual(set.sort(), ['EMPTY_ONE', 'OWNER_WHATSAPP', 'STT_URL', 'TWILIO_ACCOUNT_SID']);
+  assert.deepStrictEqual(loadEnvFile(path.join(tmpDir(), 'missing.env'), {}), []);
+});
+
+test('public visitors are rate limited on /api/act; local calls are not', async () => {
+  const srv = createServer({ env: { SHOP: 'gupta', DATA_DIR: tmpDir(), ACT_LIMIT_PER_MIN: '2' }, today: () => TODAY });
+  const base = await listen(srv);
+  try {
+    const post = (ip) => fetch(base + '/api/act', { method: 'POST', headers: { 'content-type': 'application/json', ...(ip ? { 'x-forwarded-for': ip } : {}) }, body: JSON.stringify({ action: 'nextDay', args: {} }) }).then((r) => r.status);
+    assert.deepEqual([await post('1.2.3.4'), await post('1.2.3.4'), await post('1.2.3.4')], [200, 200, 429]);
+    assert.equal(await post('5.6.7.8'), 200, 'another visitor has its own budget');
+    assert.deepEqual([await post(), await post(), await post()], [200, 200, 200], 'local calls are not limited');
+  } finally { srv.close(); }
+});
+
+test('a live shop (REAL_CLOCK=1): a public visitor cannot reset the khata or move its day', async () => {
+  const srv = createServer({ env: { SHOP: 'gupta', DATA_DIR: tmpDir(), REAL_CLOCK: '1', ADMIN_KEY: 'owner-secret' }, today: () => TODAY });
+  const base = await listen(srv);
+  try {
+    const post = (action, headers) => fetch(base + '/api/act', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ action, args: action === 'owner' ? { text: 'Sharma ji ka kitna baaki hai' } : {} }) });
+    const pub = { 'x-forwarded-for': '1.2.3.4' };
+    for (const a of ['reset', 'nextDay', 'closeDay']) {
+      const r = await post(a, pub);
+      assert.equal(r.status, 403, a);
+      assert.match((await r.json()).message, /asli dukaan/);
+    }
+    assert.equal((await post('owner', pub)).status, 200, 'everything else stays open');
+    assert.equal((await post('reset', { ...pub, 'x-admin-key': 'wrong' })).status, 403);
+    assert.equal((await post('reset', { ...pub, 'x-admin-key': 'owner-secret' })).status, 200);
+    assert.equal((await post('reset', {})).status, 200, 'the instance itself can always reset');
+  } finally { srv.close(); }
 });

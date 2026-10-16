@@ -240,6 +240,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
 .dash h2 { font: 1.45rem/1.1 var(--f-display); margin: 0; }
 .dash .dhead span { color: var(--muted); font-size: .88rem; }
 .dash h3 { font-size: .74rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+.kpitoday { grid-column: 1 / -1; white-space: pre-line; font-size: 14px; color: var(--muted, #5b564b); }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px 18px 4px; }
 @media (max-width: 900px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .kpi { border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -432,6 +433,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     <div class="kpi late"><small>Wade se late</small><b id="kLate">₹0</b><span id="kLateSub"></span></div>
     <div class="kpi"><small>Wasooli dar · 30 din</small><b id="kRate">—</b><span id="kRateSub"></span></div>
     <div class="kpi"><small>Cash confirm baaki</small><b id="kCash">₹0</b><span id="kCashSub"></span></div>
+    <div class="kpitoday" id="kToday"></div>
   </div>
   <div class="dgrid">
     <div class="chartbox" id="chartbox">
@@ -501,6 +503,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     if (REMOTE) {
       const r = await fetch('api/act', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, args: args || {} }) });
       const j = await r.json().catch(() => ({}));
+      if (r.status === 403 && j.message) throw Object.assign(new Error(j.message), { locked: true });
       if (!r.ok || !j.state) throw new Error(j.error || 'HTTP ' + r.status);
       state = j.state; engineInfo = j.engine; freshTxn = j.freshTxn; return j.result;
     }
@@ -508,7 +511,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     const out = C.runAction(state, action, args); freshTxn = out.freshTxn; return out.result;
   }
   async function safeAct(action, args) {
-    try { return await act(action, args); } catch (e) { toast('Agent tak baat nahi pahunchi (' + e.message + '). Dobara koshish kijiye.'); return undefined; }
+    try { return await act(action, args); } catch (e) { if (e.locked) { toast(e.message); return undefined; } toast('Agent tak baat nahi pahunchi (' + e.message + '). Dobara koshish kijiye.'); return undefined; }
   }
 
   // ---------- helpers ----------
@@ -768,6 +771,10 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     $('kLate').textContent = C.rupees(d.overdueAmount); $('kLateSub').textContent = d.overdue.length ? d.overdue.length + ' log wade se late' : 'koi late nahi';
     $('kRate').textContent = d.collectionRate == null ? '—' : Math.round(d.collectionRate * 100) + '%';
     $('kRateSub').textContent = d.collectionRate == null ? 'pichhle 30 din mein koi wada nahi' : C.rupees(d.dueInWindow) + ' ka wada tha · ' + Math.round(d.onTimeRate * 100) + '% time par';
+    const td = d.today;
+    $('kToday').textContent = 'Aaj: ' + C.rupees(td.newCredit) + ' naya udhaar (' + td.newCreditCount + ') · ' + C.rupees(td.back) + ' wapas (cash ' + C.rupees(td.backCash) + ', UPI ' + C.rupees(td.backUpi) + ')' + (td.disputes ? ' · ❗ ' + td.disputes + ' grahak ne galat bataya' : '');
+    const wk = d.week;
+    if (wk && wk.owed) $('kToday').textContent += '\n📦 Is hafte supplier ko ' + C.rupees(wk.owed) + ' dena · grahakon se ummeed ' + C.rupees(wk.incoming) + (wk.shortfall ? ' · ⚠️ kam padega ' + C.rupees(wk.shortfall) : ' · ✅ pura') + (wk.remindFirst.length ? ' · pehle yaad dilao: ' + wk.remindFirst.map((x) => x.name).join(', ') : '');
     $('kCash').textContent = C.rupees(d.pendingCash); $('kCashSub').textContent = d.pendingCount ? d.pendingCount + ' claim · Dukaan band par ✅/❌' : 'sab confirm';
     $('odList').innerHTML = d.overdue.length ? d.overdue.map((o) => '<li data-c="' + o.id + '" tabindex="0"><span class="ini">' + esc(initial(o.name)) + '</span><span class="nm">' + esc(o.name) + '</span>' +
       '<span class="amt">' + esc(C.rupees(o.amount)) + '</span><span class="st"><span class="late">' + o.daysLate + ' din late</span>' +
@@ -909,6 +916,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     ['🎙', 'शर्मा जी… (Hindi)', 'शर्मा जी ने 340 का सामान लिया, कल देंगे', 5, 'voice'],
     ['🎙', 'Bill: cheeni, tel, sabun', 'Sharma ji cheeni 2 kilo 90, tel 1 litre 180, sabun 40, kal denge', 7, 'voice'],
     ['🎙', 'Daam yaad se: Pappu', 'Pappu ne 500 gram cheeni, sabun 2 aur adha litre tel liya', 5, 'voice'],
+    ['🎙', 'Dukaan ki baat: Iqbal bhai', 'Aaiye Iqbal bhai. Raju, do kilo atta la, ek litre tel bhi nikal, maggi do. Kitna hua? 290', 14, 'voice'],
     ['🎙', 'aaj ka hisaab', 'Aaj ka hisaab batao', 2, 'voice'],
     ['🎙', 'Pappu ko yaad dilao', 'Pappu ko yaad dila do', 2, 'voice'],
     ['📩', 'Bank SMS forward', 'Rs 700.00 received from MEENA KUMARI via Google Pay on ' + 'today' + '. UPI Ref 551200987654', 0, 'sms'],
@@ -918,6 +926,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
   SAMPLES_BY.balaji = [
     ['🎙', 'Anita bhabhi: doodh, paneer', 'Anita bhabhi ne 2 litre doodh aur paneer liya 160 ka, kal denge', 5, 'voice'],
     ['🎙', 'Daam yaad se: Pinky', 'Pinky didi doodh 2 litre, paneer 200 gram aur bread', 5, 'voice'],
+    ['🎙', 'Dukaan ki baat: Anita bhabhi', 'Aao Anita bhabhi. Chhotu, do packet doodh nikal, paneer 200 gram bhi. Kitna hua? 140', 12, 'voice'],
     ['🎙', 'मिश्रा जी… (Hindi)', 'मिश्रा जी ने 300 का दही और मक्खन लिया, शनिवार को देंगे', 5, 'voice'],
     ['🎙', 'aaj ka hisaab', 'Aaj ka hisaab batao', 2, 'voice'],
     ['🎙', 'Suresh ko yaad dilao', 'Suresh driver ko yaad dila do', 2, 'voice'],

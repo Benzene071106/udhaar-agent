@@ -248,6 +248,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
 .dash h2 { font: 1.45rem/1.1 var(--f-display); margin: 0; }
 .dash .dhead span { color: var(--muted); font-size: .88rem; }
 .dash h3 { font-size: .74rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+.kpitoday { grid-column: 1 / -1; white-space: pre-line; font-size: 14px; color: var(--muted, #5b564b); }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px 18px 4px; }
 @media (max-width: 900px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .kpi { border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -440,6 +441,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     <div class="kpi late"><small>Wade se late</small><b id="kLate">₹0</b><span id="kLateSub"></span></div>
     <div class="kpi"><small>Wasooli dar · 30 din</small><b id="kRate">—</b><span id="kRateSub"></span></div>
     <div class="kpi"><small>Cash confirm baaki</small><b id="kCash">₹0</b><span id="kCashSub"></span></div>
+    <div class="kpitoday" id="kToday"></div>
   </div>
   <div class="dgrid">
     <div class="chartbox" id="chartbox">
@@ -2894,7 +2896,7 @@ var qrcode = function() {
     remind: /\s(yad|remind|reminder|tagada|takaja|message bhej|msg bhej|bol do|yad dila)\s/,
     all: /\s(sab|sabka|sabko|sabhi|total|kul|kon kon|kaun kaun|list|summary|report|aj ka hisab|pura hisab|sare)\s/,
     query: /\s(kitna|kitne|hisab|baki|balance|bakaya|dikha|dikhao|batao|owes|how much)\s/,
-    strongPay: /\s(cash|nakad|nakd|nagad|naqad|jama|chuka|chukaya|chukta|vapas|lauta|lautaya|lotaya|payment|paid|clear|received|mil gaya|mil gaye|mil gai|mil gae|bhej diya|bhej diye|bhej die|gave|pay kiya|pay kar diya|pay kar die)\s/,
+    strongPay: /\s(cash|nakad|nakd|nagad|naqad|jama|chuka|chukaya|chukta|vapas|lauta|lautaya|lotaya|payment|paid|clear|received|mil gaya|mil gaye|mil gai|mil gae|mile|mila|mili|bhej diya|bhej diye|bhej die|gave|pay kiya|pay kar diya|pay kar die)\s/,
     credit: /\s(liya|liye|lie|le gaya|le gaye|le gai|le gae|le gayi|le liya|saman|samaan|sauda|udhar|udhari|khate me|khate mein|khata me|likh|likho|likh do|likhdo|credit|bought|took|uthaya|le ke gaya|lekar gaya|leke gaya)\s/,
     weakPay: /\s(de diya|de diye|de die|de dia|de gaya|de gaye|de gae|de gai|de gayi|diye|diya|die|dia)\s/
   };
@@ -3157,6 +3159,7 @@ var qrcode = function() {
       const x = Object.assign({}, l, { from: l.price != null ? 'spoken' : null });
       const known = x.bare && prices(state)[x.key];
       if (known && x.price < known.rate) { x.qty = x.price; x.price = null; x.from = null; } // "sabun 2" = two soaps when soap is ₹40
+      if (x.from === 'spoken' && !x.bare && x.qty == null && !x.unit) x.amountOnly = true; // "120 ka doodh"
       delete x.bare;
       return x;
     });
@@ -3177,7 +3180,7 @@ var qrcode = function() {
     }
     const sum = lines.reduce((s, l) => s + l.price, 0);
     // a remembered rate never overrides what the owner just said: if the total doesn't match, keep it a single amount
-    if (total != null && Math.round(total - sum) && lines.some((l) => l.from === 'memory')) return null;
+    if (total != null && Math.round(total - sum) && lines.some((l) => l.from === 'memory') && !intent.counter) return null;
     if (total != null && Math.round(total - sum)) lines.push({ name: total > sum ? 'baaki saaman' : 'chhoot', qty: null, unit: null, price: Math.round(total - sum), from: 'extra' });
     return { lines, amount: total != null ? total : sum };
   }
@@ -3191,6 +3194,9 @@ var qrcode = function() {
       // "tel 180" with no unit means one of the usual unit (a litre), so it never wipes out a per-litre rate
       const [unit, f] = l.unit ? baseOf(l.unit) : [old ? old.unit : '', 1];
       const rate = Math.round((l.price / (l.unit ? l.qty * f : (l.qty || 1))) * 100) / 100;
+      // with no quantity, "120 ka doodh" is money spent, not a rate; "sabun 40" teaches a per-piece rate only for an
+      // item counted in pieces, never one sold by kilo, litre or packet
+      if (!l.unit && l.qty == null && (l.amountOnly || (old && old.unit))) continue;
       if (old && old.unit === unit && Math.abs(old.rate - rate) < 0.01) { old.date = state.today; continue; }
       if (old && old.unit === unit) notes.push(cap(l.name) + ' ' + rateText(old.rate, unit) + ' → ' + rateText(rate, unit));
       else notes.push(cap(l.name) + ' ' + rateText(rate, unit));
@@ -3200,6 +3206,109 @@ var qrcode = function() {
   }
   /** The shop's remembered rates, newest first (shown on the dashboard). */
   const rateList = (state) => Object.keys(prices(state)).map((k) => Object.assign({ key: k }, prices(state)[k])).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.name < b.name ? -1 : 1));
+
+
+  // ------------------------------------------- counter bill: the shop's own talk becomes the bill
+  // At the counter the owner calls items out to a helper ("Raju, do kilo cheeni la, ek tel bhi nikal") and someone
+  // says the total aloud at the end ("kitna hua? 310"). The owner holds the WhatsApp mic through that, and the agent
+  // keeps only the bill: items, rates, the spoken total, and whether the two agree. Nothing else is kept.
+  const HELPER_VERB = new Set(['la', 'lao', 'laa', 'laao', 'lana', 'nikal', 'nikalo', 'nikaal', 'nikalna', 'utha', 'uthao', 'rakh', 'rakho', 'pack', 'tol', 'tolo', 'bandh', 'bandho'].map(normWord));
+  const COUNTER_FILLER = new Set(['bhi', 'kuch', 'bas', 'aur', 'aiye', 'aaiye', 'aao', 'aa', 'suno', 'dekho', 'chalo', 'jaldi', 'jao', 'ja', 'le', 'leke', 'lekar', 'de', 'na', 'nahi', 'haan', 'han', 'theek', 'thik', 'sahi', 'ho', 'gaya', 'gaye', 'hua', 'hue', 'hai', 'hain', 'ke', 'ka', 'ki', 'ko', 'khate', 'khata', 'mein', 'me', 'likh', 'likho', 'likhna', 'likhdo', 'kar', 'karo', 'kardo', 'diya', 'dedo', 'dijiye', 'dijie', 'dena', 'rs', 'rupaye', 'rupaya', 'rupe', 'rupees'].map(normWord));
+  const TOTAL_CUE = new Set(['kitna', 'kitana', 'kitne', 'kitni', 'total', 'kul', 'jod', 'hisab', 'bill', 'bil'].map(normWord));
+  // "tin sau das" → 310, "dhai sau" → 250, "sadhe tin sau" → 350; digits as they are
+  function numberAt(n, i) {
+    if (isNum(n[i])) { let v = parseFloat(n[i]), j = i; if (MULT[n[i + 1]]) { v *= MULT[n[i + 1]]; j++; } return { v, end: j }; }
+    let v = 0, cur = 0, j = i, any = false, half = 0;
+    for (; j < n.length; j++) {
+      const w = n[j];
+      if (w === 'sade' || w === 'sadhe') { half = 0.5; continue; }
+      if (w === 'dedh') { cur = 1.5; any = true; continue; }
+      if (w === 'dhai') { cur = 2.5; any = true; continue; }
+      if (NUMWORDS[w] != null) { cur += NUMWORDS[w]; any = true; continue; }
+      if (isNum(w)) { cur += parseFloat(w); any = true; continue; }
+      if (MULT[w] && any) { v += (cur + half) * MULT[w]; cur = 0; half = 0; continue; }
+      break;
+    }
+    return any ? { v: v + cur, end: j - 1 } : null;
+  }
+  /** Does this sound like counter talk (items called to a helper, or a total asked aloud) rather than a dictated entry? */
+  function looksLikeCounter(text) {
+    const n = tokenize(text).norm;
+    const helper = n.some((w) => HELPER_VERB.has(w));
+    const asked = n.some((w, i) => /^(kitna|kitana|kitne)$/.test(w) && /^(hua|hue|huwa|ho)$/.test(n[i + 1] || ''));
+    return helper || asked;
+  }
+  function counterIntent(state, text) {
+    const tok = tokenize(String(text).replace(/[.?!।|]+/g, ', '));
+    const n = tok.norm.slice(), d = tok.display.slice();
+    const skip = new Set();
+    // the total said aloud: the last "kitna hua? 310" / "total 310" / "310 hue"
+    let total = null;
+    for (let i = 0; i < n.length; i++) {
+      if (TOTAL_CUE.has(n[i])) {
+        for (let j = i + 1; j < Math.min(n.length, i + 7); j++) {
+          const x = numberAt(n, j);
+          if (x && !UNIT_OF[n[x.end + 1]]) { total = x.v; for (let k = i; k <= x.end; k++) skip.add(k); i = x.end; break; }
+          if (x || UNIT_OF[n[j]]) break; // a quantity, not the total
+        }
+      } else {
+        const x = numberAt(n, i);
+        if (x && /^(hua|hue|huwa|ho)$/.test(n[x.end + 1] || '') && !UNIT_OF[n[i - 1]]) { total = x.v; for (let k = i; k <= x.end + 1; k++) skip.add(k); i = x.end + 1; }
+      }
+    }
+    // who it is for: a khata name in the talk. A name that only gets orders ("Raju, cheeni la") is the helper.
+    const clauseHasHelper = (i) => {
+      for (let j = i + 1; j < n.length && n[j] !== 'aur'; j++) if (HELPER_VERB.has(n[j])) return true;
+      return false;
+    };
+    const cand = new Map();
+    for (let i = 0; i < n.length; i++) {
+      for (const c of state.customers) {
+        const kw = c.key.split(' ');
+        if (n.slice(i, i + kw.length).join(' ') !== c.key && !(kw[0].length >= 3 && n[i] === kw[0] && !prices(state)[n[i]])) continue;
+        const len = n.slice(i, i + kw.length).join(' ') === c.key ? kw.length : 1;
+        let score = 1;
+        const after = n.slice(i + len, i + len + 4).join(' ');
+        if (HONORIFICS.has(n[i + len])) score += 2;
+        if (/^(ji |bhai |didi |bhabhi |aunty )?(ke|ka|ki) (khate|khata|naam|nam)|^(ji )?(ko|ke liye|ka bill|ka saman|ka saaman)/.test(after)) score += 3;
+        if (!HONORIFICS.has(n[i + len]) && clauseHasHelper(i + len - 1)) score -= 5;
+        const prev = cand.get(c.id);
+        cand.set(c.id, { c, score: (prev ? Math.max(prev.score, score) : score), at: (prev ? prev.at : []).concat([[i, len]]) });
+      }
+    }
+    // "Raju do kilo cheeni la": the first word of an order, before the quantity, is the helper being addressed
+    for (let i = 0; i < n.length; i++) {
+      if ((i === 0 || n[i - 1] === 'aur') && /^[a-z]{3,}$/.test(n[i]) && !prices(state)[n[i]] && !UNIT_OF[n[i + 1]] &&
+        (isNum(n[i + 1]) || NUMWORDS[n[i + 1]] != null || n[i + 1] === 'dedh' || n[i + 1] === 'adha') && clauseHasHelper(i)) skip.add(i);
+    }
+    const ranked = [...cand.values()].filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+    const cust = ranked.length && (ranked.length === 1 || ranked[0].score > ranked[1].score) ? ranked[0].c : null;
+    // no khata yet: a name said with respect ("Verma ji") is the customer; a helper gets orders, not "ji"
+    let newName = null;
+    if (!cust && !ranked.length) {
+      for (let i = 0; i < n.length && !newName; i++) {
+        if (HONORIFICS.has(n[i + 1]) && /^[a-z]{3,}$/.test(n[i]) && isItemWord(n[i]) && !prices(state)[n[i]] && !UNIT_OF[n[i]]) {
+          newName = { name: prettyName([d[i], d[i + 1]]), key: nameKey([n[i]]) }; skip.add(i); skip.add(i + 1);
+          for (let j = i + 2; j < n.length; j++) if (n[j] === n[i]) { skip.add(j); if (HONORIFICS.has(n[j + 1])) skip.add(j + 1); }
+        }
+      }
+    }
+    for (const x of cand.values()) for (const [i, len] of x.at) for (let k = i; k < i + len + (HONORIFICS.has(n[i + len]) ? 1 : 0); k++) skip.add(k);
+    const counts = {};
+    for (let i = 0; i < n.length; i++) {
+      if (HELPER_VERB.has(n[i]) || COUNTER_FILLER.has(n[i]) && n[i] !== 'aur') skip.add(i);
+      // "sabun do" at the end of a clause is two soaps
+      if (NUMWORDS[n[i]] != null && isItemWord(n[i - 1]) && !skip.has(i - 1) && (!n[i + 1] || n[i + 1] === 'aur' || HELPER_VERB.has(n[i + 1]))) { counts[n[i - 1]] = NUMWORDS[n[i]]; skip.add(i); }
+    }
+    const lp = parseLines({ norm: n, display: d }, skip);
+    for (const l of lp.lines) { const k = l.key.split(' ').pop(); if (counts[k] && l.price == null && l.qty == null) l.qty = counts[k]; }
+    // a word on its own with no amount, quantity or remembered rate is chatter, not an item
+    lp.lines = lp.lines.filter((l) => l.price != null || l.qty != null || prices(state)[l.key]);
+    lp.total = total; lp.loose = [];
+    const who = cust ? { name: cust.name, key: cust.key } : newName || { name: null, key: null };
+    return { intent: 'credit', counter: { total, heard: String(text).slice(0, 500) }, lineParse: lp, name: who.name, nameKey: who.key,
+      amount: total, items: '', dueDate: null, raw: text, parser: 'rules' };
+  }
 
   // -------------------------------------------------------------- parse
   /** Rule-based parser. Returns an intent object; an LLM parser should return the same shape. */
@@ -3295,6 +3404,19 @@ var qrcode = function() {
       if (intent.intent === 'choice' && intent.choice >= 1 && intent.choice <= p.options.length) chosen = p.options[intent.choice - 1];
       else if (intent.nameKey) { const f = findCustomers(state, intent.nameKey).filter((c) => p.options.includes(c.id)); if (f.length === 1) chosen = f[0].id; }
       if (intent.intent === 'choice' && p.allowNew && intent.choice === p.options.length + 1) chosen = '__new__';
+      if (p.type === 'counter' && intent.nameKey) {
+        const f = findCustomers(state, intent.nameKey);
+        state.pending = null;
+        if (f.length > 1) {
+          state.pending = { type: 'action', options: f.map((c) => c.id), action: Object.assign({}, p.action, { name: intent.name, nameKey: intent.nameKey }), allowNew: true };
+          reply('Kaun se ' + intent.name + '?\n' + f.map((c, i) => (i + 1) + '. ' + c.name + ' (baaki ' + rupees(balance(state, c.id)) + ')').join('\n') + '\n' + (f.length + 1) + '. Naya khata\nNumber bhejiye.');
+          return out;
+        }
+        else {
+          const c = f[0] || addCustomer(state, intent.name, intent.nameKey);
+          return out.concat(execute(state, Object.assign({}, p.action, { name: c.name, nameKey: c.key }), c, reply));
+        }
+      }
       if (chosen) {
         state.pending = null;
         if (p.type === 'upi') return out.concat(settleUpi(state, p.upi, getCust(state, chosen), 'owner-confirmed'));
@@ -3341,6 +3463,11 @@ var qrcode = function() {
     }
 
     // customer-specific intents
+    if (!intent.nameKey && intent.counter && intent.amount > 0) {
+      state.pending = { type: 'counter', options: [], action: intent, allowNew: true };
+      reply('🧾 Bill bana, ' + rupees(intent.amount) + (intent.lines ? ':\n' + billText(intent.lines) : '') + '\nKiske khate mein likhun? Bas naam boliye, jaise "Sharma ji".', { kind: 'counter-ask' });
+      return out;
+    }
     if (!intent.nameKey) { reply('Kiska khata? Naam ke saath boliye, jaise "Sharma ji ne 340 ka saaman liya".'); return out; }
     const matches = findCustomers(state, intent.nameKey);
     if (matches.length > 1) {
@@ -3363,7 +3490,8 @@ var qrcode = function() {
     switch (intent.intent) {
       case 'credit': {
         // a new entry keeps an existing future promise, but never inherits a date that has already passed
-        const due = intent.dueDate || (cust.dueDate && cust.dueDate > state.today && balance(state, cust.id) > 0 ? cust.dueDate : addDays(state.today, state.shop.defaultDays));
+        const due = intent.dueDate || (cust.dueDate && cust.dueDate > state.today && balance(state, cust.id) > 0 ? cust.dueDate : nextPayday(state, cust) || addDays(state.today, state.shop.defaultDays));
+        if (cust.guest) { delete cust.guest; log(state, 'customer', 'Owner opened khata for ' + cust.name + ' by writing udhaar'); }
         const tx = { id: nextId(state, 'T'), custId: cust.id, type: 'credit', amount: intent.amount, items: intent.items || '', date: state.today, dueDate: due, note: intent.raw || '', source: intent.source || 'text', parser: intent.parser || 'rules' };
         if (intent.lines) tx.lines = intent.lines.map((l) => ({ name: l.name, qty: l.qty, unit: l.unit, price: l.price, from: l.from }));
         state.txns.push(tx);
@@ -3372,11 +3500,18 @@ var qrcode = function() {
         cust.dueDate = due; cust.reminderLevel = 0; cust.lastReminder = null;
         state.lastAction = { txnId: tx.id };
         log(state, 'credit', cust.name + ' +' + rupees(intent.amount) + ' (due ' + fmtDate(due) + ')');
-        let text = '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' +
+        const ct = intent.counter;
+        if (ct) { tx.via = 'counter'; tx.spokenTotal = ct.total; }
+        const said = ct && ct.total != null && tx.lines ? ct.total : null;
+        const heardSum = said != null ? tx.lines.filter((l) => l.from !== 'extra').reduce((a, l) => a + l.price, 0) : null;
+        let text = (ct ? '🧾 Dukaan ki baat se bill. ' : '') + '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' +
           (tx.lines ? ':\n' + billText(tx.lines) + (remembered.length ? '\n🧠 Daam yaad se: ' + remembered.map((l) => l.name + ' ' + rateText(l.rate, l.rateUnit)).join(', ') : '') +
-            (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko bhej di, woh "Haan / Galat" se check karenge.' : '')
+            (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko WhatsApp par bhej rahe hain, woh "Haan / Galat" se check karenge.' : '')
             : (intent.items ? ' (' + intent.items + ')' : '') + '.') + '\nKul baaki: ' + rupees(balance(state, cust.id)) + '\n📅 ' +
           (intent.dueDate ? 'Wada: ' + fmtDay(due) + '. Usi din yaad dila dunga.' : fmtDay(due) + ' ko yaad dila dunga (koi tareekh nahi boli thi).');
+        text += limitNote(state, cust);
+        if (said != null && Math.round(said - heardSum)) text += '\n⚠️ Items ka jod ' + rupees(heardSum) + ', bola gaya total ' + rupees(said) + '. ' + rupees(said) + ' likha. Galat ho toh "galti" boliye.';
+        else if (said != null) text += '\n👍 Items ka jod bole gaye total ' + rupees(said) + ' se milta hai.';
         if (!cust.phone) text += '\n📱 ' + cust.name + ' ka WhatsApp number bhej dijiye, reminder ke liye. Jaise: "' + cust.name + ' ka number 98xxxxxxxx"';
         reply(text);
         break;
@@ -3427,18 +3562,117 @@ var qrcode = function() {
   }
 
   /** Full pipeline for an owner message: rule parse (or a supplied intent), record, apply. */
+  // ------------------------------------------------------------ the shop's own udhaar (wholesaler / distributor)
+  // The owner buys maal on credit too. "Agrawal traders se 8000 ka maal udhaar, 18 tareekh tak" records it;
+  // "Agrawal traders ko 8000 de diye" pays it. The weekly view sets it against what customers are likely to pay.
+  const supplies = (state) => (state.supplies = state.supplies || []);
+  const SUPPLIER_WORD = /\s(traders?|agenc(y|ies)|agensi|distributors?|wholesal(e|er)|supplier|suppliers|enterprises?|stores|mandi|godown|company|brothers|bros|dairy|marketing|sales)\s/;
+  // the spelling-normalised words and the words as typed, so "maal", "mal", "supplier" and "suplier" all match
+  const both = (text, tok) => (tok || tokenize(text)).text + ' ' + String(text).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ') + ' ';
+  const supOwed = (k) => Math.max(0, Math.round(k.amount - (k.paid || 0)));
+  const supKey = (words) => words.filter((w) => !HONORIFICS.has(w)).join(' ');
+  function findSupplier(state, key) {
+    if (!key) return null;
+    return supplies(state).filter((k) => supOwed(k) > 0).find((k) => k.key === key || k.key.startsWith(key + ' ') || key.startsWith(k.key + ' ')) || null;
+  }
+  /** A supplier message as { kind: 'new'|'paid', ... }, or null when the message is about customers. */
+  function parseSupplier(state, text) {
+    const tok = tokenize(text), t = both(text, tok), n = tok.norm;
+    const se = n.indexOf('se'), ko = n.indexOf('ko');
+    const { due, skip } = extractDue(tok, state.today);
+    const amt = extractAmount(tok, skip || new Set());
+    const amount = amt && amt.amount > 0 ? amt.amount : null;
+    const nameAt = (i) => {
+      const words = []; for (let j = 0; j < i; j++) { if (/^\d/.test(n[j])) break; words.push(j); }
+      return { key: supKey(words.map((j) => n[j])), name: words.filter((j) => !HONORIFICS.has(n[j])).map((j) => cap(tok.display[j].toLowerCase())).join(' ') };
+    };
+    if (ko > 0 && amount && /\s(de diye|de diya|diye|diya|chuka|chukaya|chuka diya|chuka diye|bhej diye|bhej diya|payment|paid)\s/.test(t)) {
+      const who = nameAt(ko), k = findSupplier(state, who.key);
+      if (k) return { kind: 'paid', sup: k, amount };
+    }
+    if (se > 0 && amount && (SUPPLIER_WORD.test(both(tok.display.slice(0, se).join(' '))) || /\s(maal|mal)\s/.test(t)) && /\s(maal|mal|udhaar|udhar|liya|liye|aaya|aya|uthaya|mangaya)\s/.test(t)) {
+      const who = nameAt(se);
+      if (who.key) return { kind: 'new', key: who.key, name: who.name, amount, dueDate: due || addDays(state.today, 7) };
+    }
+    return null;
+  }
+  function applySupplier(state, sp, reply) {
+    if (sp.kind === 'new') {
+      const k = { id: nextId(state, 'S'), key: sp.key, name: sp.name, amount: sp.amount, paid: 0, date: state.today, dueDate: sp.dueDate };
+      supplies(state).push(k);
+      log(state, 'supplier', k.name + ' +' + rupees(k.amount) + ' (due ' + fmtDate(k.dueDate) + ')');
+      reply('📦 Likh liya: ' + k.name + ' ka ' + rupees(k.amount) + ' maal udhaar, ' + fmtDay(k.dueDate) + ' tak dena hai.\n' + weekLine(state) + '\nPura hafta dekhne ke liye: "is hafte ka hisaab"');
+    } else {
+      const k = sp.sup;
+      k.paid = Math.min(k.amount, (k.paid || 0) + sp.amount);
+      log(state, 'supplier', k.name + ' paid ' + rupees(sp.amount));
+      reply('✅ ' + k.name + ' ko ' + rupees(sp.amount) + ' diye. ' + (supOwed(k) ? 'Ab bhi dena hai: ' + rupees(supOwed(k)) + '.' : 'Inka hisaab clear.') + '\n' + weekLine(state));
+    }
+  }
+  /**
+   * The week ahead: what the shop owes suppliers by then, what customers are likely to pay by then (their baaki
+   * times how reliably they have paid on time before; half that once they are already late), and the gap.
+   */
+  function weekStats(state) {
+    const T = state.today, end = addDays(T, 6);
+    const owe = supplies(state).filter((k) => supOwed(k) > 0 && k.dueDate <= end).sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1))
+      .map((k) => ({ id: k.id, name: k.name, amount: supOwed(k), dueDate: k.dueDate }));
+    const exp = state.customers.map((c) => {
+      const b = balance(state, c.id);
+      if (b <= 0 || !c.dueDate || c.dueDate > end) return null;
+      const r = customerScore(state, c.id).onTimeRate;
+      const p = (r == null ? 0.5 : r) * (c.dueDate < T ? 0.5 : 1);
+      return { id: c.id, name: c.name, balance: Math.round(b), expected: Math.round(b * p), late: c.dueDate < T };
+    }).filter(Boolean).sort((a, b) => b.expected - a.expected || b.balance - a.balance);
+    const owed = owe.reduce((s, k) => s + k.amount, 0), dueIn = exp.reduce((s, x) => s + x.balance, 0), incoming = exp.reduce((s, x) => s + x.expected, 0);
+    return { from: T, to: end, owe, owed, dueIn, incoming, shortfall: Math.max(0, owed - incoming), remindFirst: exp.slice(0, 3).map((x) => ({ id: x.id, name: x.name, balance: x.balance })) };
+  }
+  function weekLine(state) {
+    const w = weekStats(state);
+    if (!w.owed) return '📦 Is hafte supplier ko kuch dena nahi hai.';
+    return '📦 Is hafte dena: ' + rupees(w.owed) + ' · grahakon se ummeed: ' + rupees(w.incoming) + (w.shortfall ? ' · ⚠️ kam padega: ' + rupees(w.shortfall) : ' · ✅ pura ho jayega');
+  }
+  function weekText(state) {
+    const w = weekStats(state);
+    const lines = ['📦 Is hafte ka hisaab (' + fmtDate(w.from) + ' se ' + fmtDate(w.to) + ')'];
+    lines.push(w.owe.length ? 'Supplier ko dena: ' + rupees(w.owed) + '\n' + w.owe.map((k) => '  • ' + k.name + ' ' + rupees(k.amount) + ', ' + fmtDay(k.dueDate)).join('\n')
+      : 'Supplier ko dena: ₹0. Likhne ke liye: "Agrawal traders se 8000 ka maal udhaar, 20 tareekh tak"');
+    lines.push('Grahakon se aana hai: ' + rupees(w.dueIn) + ' (is hafte ke wade)');
+    lines.push('Aane ki ummeed: ' + rupees(w.incoming) + ' (har grahak ke purane time-par record se)');
+    if (w.owed) lines.push(w.shortfall ? '⚠️ Kam padega: ' + rupees(w.shortfall) : '✅ Paisa pura ho jayega');
+    if (w.remindFirst.length) lines.push('Pehle inhe yaad dilaiye: ' + w.remindFirst.map((x) => x.name + ' ' + rupees(x.balance)).join(', ') + '\n("' + w.remindFirst[0].name + ' ko yaad dilao" likhiye)');
+    return lines.join('\n');
+  }
+  const WEEK_ASK = /\s(hafte|hafta|hafte ka|week|weekly|supplier|suppliers|wholesaler|distributor|maal ka udhaar|maal ka udhar)\s/;
+
   function handleOwnerMessage(state, text, opts) {
     opts = opts || {};
     recordOwnerMessage(state, text, opts.source);
-    const intent = opts.intent || parseOwnerMessage(text, state.today);
+    pruneAsks(state);
+    const yn = shortAnswer(text);
+    if (yn && ownerAsks(state).length && !state.pending) return { intent: { intent: 'owner-ask' }, messages: answerOwnerAsk(state, yn === 'yes') };
+    if (!state.pending) {
+      const sp = parseSupplier(state, text);
+      if (sp) { const out = []; applySupplier(state, sp, (t) => emit(state, out, 'owner', t, { kind: 'supplier' })); return { intent: { intent: 'supplier' }, messages: out }; }
+      if (WEEK_ASK.test(both(text)) && !/\d/.test(text)) { const out = []; emit(state, out, 'owner', weekText(state), { kind: 'week' }); return { intent: { intent: 'week' }, messages: out }; }
+    }
+    let intent = opts.intent || parseOwnerMessage(text, state.today);
+    if (!state.pending && looksLikeCounter(text)) intent = counterIntent(state, text);
     intent.source = opts.source || 'text';
     intent.raw = text;
     const bill = itemize(state, intent, text);
+    if (intent.counter && !(bill && bill.lines)) {
+      if (intent.counter.total > 0) intent.lines = null; // no items heard: the spoken total alone
+      else { intent = parseOwnerMessage(text, state.today); intent.source = opts.source || 'text'; intent.raw = text; }
+    }
     if (bill && bill.lines) {
       intent.intent = 'credit'; intent.amount = bill.amount; intent.lines = bill.lines;
       intent.items = bill.lines.filter((l) => l.from !== 'extra').map((l) => l.name + (qtyText(l) ? ' ' + qtyText(l) : '')).join(', ');
     } else if (bill && bill.missing && intent.nameKey) { intent.intent = 'need_rate'; intent.missing = bill.missing; }
     const out = applyIntent(state, intent);
+    pruneAsks(state);
+    // an open order or new number is never lost: it rides along under whatever the owner asked
+    if (ownerAsks(state).length && !out.some((m) => m.kind === 'owner-ask')) emit(state, out, 'owner', askText(state, ownerAsks(state)[0]), { kind: 'owner-ask' });
     return { intent, messages: dedupe(out) };
   }
   const dedupe = (arr) => arr.filter((m, i) => arr.indexOf(m) === i);
@@ -3458,6 +3692,12 @@ var qrcode = function() {
     const text = reminderText(state, c, level);
     emit(state, out, c.id, text, { kind: 'reminder', level, upi: upiLink(state, c, bal), amount: bal });
     c.lastReminder = state.today; c.reminderLevel = Math.max(c.reminderLevel || 0, level);
+    const vb = c.vouch && getCust(state, c.vouch.by);
+    if (vb && level >= 2 && c.vouch.toldFor !== c.dueDate) {
+      c.vouch.toldFor = c.dueDate;
+      emit(state, out, vb.id, '🙏 ' + vb.name + ', ' + c.name + ' (jinki aapne pehchan di thi) ka ' + rupees(bal) + ' ' + daysBetween(c.dueDate, state.today) + ' din se baaki hai. Aap par koi udhaar nahi hai; bas bata rahe hain, ho sake toh unhe yaad dila dijiye.', { kind: 'vouch-late' });
+      log(state, 'vouch', 'Told ' + vb.name + ' that ' + c.name + ' is late');
+    }
     log(state, 'reminder', 'L' + level + ' reminder to ' + c.name + ' for ' + rupees(bal) + ' (' + why + ')');
   }
 
@@ -3485,22 +3725,36 @@ var qrcode = function() {
     return out;
   }
 
-  function summaryText(state, when) {
-    const today = state.today;
-    const tx = state.txns.filter((t) => t.date === today && !t.voided);
+  /** Today's numbers for the owner: the same figures on WhatsApp, in the evening summary and on the dashboard. */
+  function todayStats(state) {
+    const tx = state.txns.filter((t) => t.date === state.today && !t.voided);
+    const sum = (a) => Math.round(a.reduce((s, t) => s + t.amount, 0));
     const cr = tx.filter((t) => t.type === 'credit'), pay = tx.filter((t) => t.type === 'payment');
-    const sum = (a) => a.reduce((s, t) => s + t.amount, 0);
     const owing = state.customers.map((c) => ({ c, b: balance(state, c.id) })).filter((x) => x.b > 0).sort((a, b) => b.b - a.b);
-    const overdue = owing.filter((x) => x.c.dueDate && x.c.dueDate < today);
-    const tomorrow = owing.filter((x) => x.c.dueDate === addDays(today, 1));
+    const pend = claims(state).filter((k) => k.status === 'pending');
+    return {
+      newCredit: sum(cr), newCreditCount: cr.length,
+      back: sum(pay), backCount: pay.length, backCash: sum(pay.filter((t) => t.source !== 'upi')), backUpi: sum(pay.filter((t) => t.source === 'upi')), // the owner's own "jama" is cash in hand
+      outstanding: Math.round(totalOutstanding(state)), owingCount: owing.length,
+      payers: pay.map((t) => getCust(state, t.custId).name + ' ' + rupees(t.amount)),
+      top: owing.slice(0, 3).map((x) => ({ id: x.c.id, name: x.c.name, amount: Math.round(x.b) })),
+      pendingCash: pend.filter((k) => k.type !== 'check').length, disputes: pend.filter((k) => k.type === 'check').length,
+      owing
+    };
+  }
+  function summaryText(state, when) {
+    const today = state.today, s = todayStats(state);
+    const overdue = s.owing.filter((x) => x.c.dueDate && x.c.dueDate < today);
+    const tomorrow = s.owing.filter((x) => x.c.dueDate === addDays(today, 1));
     return (when === 'evening' ? '🌙 Aaj ka hisaab, ' : '📊 Hisaab, ') + fmtDay(today) + '\n' +
-      'Naya udhaar: ' + rupees(sum(cr)) + ' (' + cr.length + ' entry)\n' +
-      'Wapas aaya: ' + rupees(sum(pay)) + (pay.length ? ' (' + pay.map((t) => getCust(state, t.custId).name + ' ' + rupees(t.amount)).join(', ') + ')' : '') + '\n' +
-      'Kul baaki: ' + rupees(totalOutstanding(state)) + ' (' + owing.length + ' log)\n' +
-      (claims(state).some((k) => k.status === 'pending') ? '💵 Confirm karna hai: ' + claims(state).filter((k) => k.status === 'pending').length + ' (neeche)\n' : '') +
-      (overdue.length ? '⚠️ Late: ' + overdue.slice(0, 5).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') + '\n' : '') +
-      (tomorrow.length ? '📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') + '\n' : '') +
-      (owing.length ? 'Sabse zyada: ' + owing.slice(0, 3).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') : '');
+      'Aaj naya udhaar: ' + rupees(s.newCredit) + ' (' + s.newCreditCount + ' entry)\n' +
+      'Aaj wapas aaya: ' + rupees(s.back) + (s.back ? ' (cash ' + rupees(s.backCash) + ', UPI ' + rupees(s.backUpi) + ': ' + s.payers.slice(0, 4).join(', ') + (s.payers.length > 4 ? ' +' + (s.payers.length - 4) : '') + ')' : '') + '\n' +
+      'Kul baaki: ' + rupees(s.outstanding) + ' (' + s.owingCount + ' log)\n' +
+      (s.top.length ? 'Sabse zyada: ' + s.top.map((x) => x.name + ' ' + rupees(x.amount)).join(', ') + '\n' : '') +
+      '💵 Cash ✅ baaki: ' + s.pendingCash + ' · ❗ Grahak ne galat bataya: ' + s.disputes +
+      (overdue.length ? '\n⚠️ Late: ' + overdue.slice(0, 5).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') : '') +
+      (tomorrow.length ? '\n📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') : '') +
+      (supplies(state).some((k) => supOwed(k) > 0) ? '\n' + weekLine(state) : '');
   }
   /** Closing time: one summary, then one batch of cash claims for the owner to tick ✅ or ❌. */
   function runEveningSummary(state) {
@@ -3597,6 +3851,160 @@ var qrcode = function() {
     return out;
   }
 
+  // ------------------------------------------------------------ naye log: udhaar for a newcomer someone vouches for
+  // Shops give udhaar only to people they know. A newcomer (a student or a new job in a new city) is known to nobody,
+  // so a khata customer vouches: "Rahul 98xxxxxxxx mera roommate hai, main jaanta hoon". The owner says one "ok" and the
+  // newcomer gets a small limit that grows with every on-time repayment. The voucher is told if the newcomer is late,
+  // once; the debt never moves onto the voucher.
+  const VOUCH = { start: 300, step: 200, cap: 1500 };
+  const VOUCH_CUE = /\s(jaanta|janta|jaanti|janti|jaante|jante|pehchan|pahchan|pehchanta|guarantee|garanti|bharosa|bharose|roommate|rumet|dost|friend|padosi|rishtedar|cousin|colleague|sath kaam|saath kaam)\s/;
+  function parseVouch(state, text) {
+    const m = /(?:\+?91[\s-]?)?([6-9]\d{9})\b/.exec(String(text));
+    if (!m || !VOUCH_CUE.test(' ' + tokenize(text).text + ' ' + String(text).toLowerCase() + ' ')) return null;
+    const before = String(text).slice(0, m.index);
+    const tok = tokenize(before.replace(/[^\p{L}\s]/gu, ' '));
+    const words = tok.norm.map((w, i) => ({ n: w, d: tok.display[i] })).filter((w) => /^[a-z]{2,}$/.test(w.n) && !HONORIFICS.has(w.n) && !STOP.has(w.n)).slice(-2);
+    const name = words.length ? prettyName(words.map((w) => w.d)) : 'Grahak ' + m[1].slice(-4);
+    return { phone: m[1], name, key: words.length ? nameKey(words.map((w) => w.n)) : 'grahak ' + m[1].slice(-4) };
+  }
+  function handleVouch(state, voucher, v, out) {
+    let c = state.customers.find((x) => x.phone === v.phone);
+    if (c && !c.guest) { emit(state, out, voucher.id, c.name + ' pehle se ' + state.shop.name + ' ke khate mein hain 🙏'); return out; }
+    if (!c) c = addCustomer(state, state.customers.some((x) => x.key === v.key) ? v.name + ' ' + v.phone.slice(-4) : v.name, v.key, { phone: v.phone, guest: true });
+    c.vouch = { by: voucher.id, date: state.today };
+    log(state, 'vouch', voucher.name + ' vouched for ' + c.name);
+    emit(state, out, voucher.id, 'Dhanyavaad ' + voucher.name + ' 🙏 Dukaandaar se poochkar ' + c.name + ' ka khata kholenge, chhoti seema (' + rupees(VOUCH.start) + ') se.\nAap par koi udhaar nahi aayega. Bas ' + c.name + ' late hue toh aapko ek baar bata denge.');
+    state.ownerAsks = ownerAsks(state).filter((a) => !(a.type === 'guest' && a.custId === c.id));
+    askOwner(state, out, { type: 'vouch', custId: c.id });
+    return out;
+  }
+  /** A vouched customer's udhaar limit: the start, one step up for every udhaar repaid on time since, up to the cap. */
+  function udhaarLimit(state, c) {
+    if (c.limit == null) return null;
+    const since = c.limitSince || '0000';
+    const onTime = creditHistory(state, c.id).filter((h) => h.t.date >= since && h.cleared && daysBetween(h.t.dueDate || addDays(h.t.date, 7), h.cleared) <= 1).length;
+    return Math.min(c.limitCap || VOUCH.cap, c.limit + onTime * VOUCH.step);
+  }
+  /** The next salary / stipend day the customer gave ("1 tareekh"), as a date after today. */
+  function nextPayday(state, c) {
+    if (!c.payday) return null;
+    const [y, mo] = state.today.split('-').map(Number), pad = (n) => String(n).padStart(2, '0');
+    const at = (yy, mm) => { const last = new Date(Date.UTC(yy, mm, 0)).getUTCDate(); return yy + '-' + pad(mm) + '-' + pad(Math.min(c.payday, last)); };
+    const d = at(y, mo);
+    return d > state.today ? d : (mo === 12 ? at(y + 1, 1) : at(y, mo + 1));
+  }
+  const limitNote = (state, c) => { const l = udhaarLimit(state, c); return l == null ? '' : '\n🤝 Seema ' + rupees(l) + ' (abhi baaki ' + rupees(Math.max(0, balance(state, c.id))) + ')' + (balance(state, c.id) > l ? ' ⚠️ seema se upar' : ''); };
+
+  // ------------------------------------------------------------ customer orders (the Blinkit answer)
+  // A customer sends the list ("aata 5 kilo, tel 1 litre"); the agent prices it from the shop's own rate memory and
+  // asks "udhaar mein likhein?". The owner says one "ok" and it becomes a khata entry. Only people already in the khata
+  // are offered udhaar; a new number orders for cash until the owner opens their khata.
+  const orders = (state) => (state.orders = state.orders || []);
+  const ORDER_FILLER = new Set(['order', 'chahiye', 'chahie', 'bhej', 'bhejo', 'bhejna', 'bhejiye', 'bhijwa', 'bhijwado', 'dena', 'dijiye', 'de', 'do', 'please', 'plz', 'ghar', 'pe', 'par', 'likh', 'likhna', 'likhdo', 'khate', 'khata', 'mein', 'me', 'aur', 'bhi', 'jaldi', 'abhi', 'mujhe', 'humko', 'hume'].map(normWord));
+  function orderLines(state, text) {
+    const lines = [];
+    for (const l of parseLines(tokenize(text), new Set()).lines) {
+      const keep = l.key.split(' ').map((k, i) => [k, l.name.split(' ')[i]]).filter(([k]) => k && !ORDER_FILLER.has(k));
+      if (!keep.length) continue;
+      const x = { name: keep.map((w) => w[1]).join(' '), key: keep.map((w) => w[0]).join(' '), qty: l.qty, unit: l.unit, price: null, from: null };
+      if (l.price != null && x.qty == null) x.qty = l.price; // a customer says how many, never the price: "maggi 4"
+      const r = rateFor(state, x);
+      if (r) { x.price = r.price; x.rate = r.rate; x.rateUnit = r.unit; x.from = 'memory'; }
+      lines.push(x);
+    }
+    return lines;
+  }
+  function orderText(o) {
+    return o.lines.map((l) => '  • ' + cap(l.name) + (qtyText(l) ? ' ' + qtyText(l) : '') + (l.price != null ? ' = ' + rupees(l.price) : ' (daam dukaan par)')).join('\n') +
+      '\n  Jod: ' + rupees(o.amount) + (o.lines.some((l) => l.price == null) ? ' + jinka daam nahi pata' : '');
+  }
+  /** The owner's open questions (new numbers, orders), oldest first; the first is what "ok" / "nahi" answers. */
+  const ownerAsks = (state) => (state.ownerAsks = state.ownerAsks || []);
+  /** Drop questions that no longer need an answer: a number whose khata the owner opened by writing udhaar, an order already settled. */
+  function pruneAsks(state) {
+    state.ownerAsks = ownerAsks(state).filter((a) => a.type === 'guest' || a.type === 'vouch' ? (getCust(state, a.custId) || {}).guest : (orders(state).find((o) => o.id === a.orderId) || {}).status === 'owner');
+  }
+  function askOwner(state, out, ask) {
+    if (ask.custId && ownerAsks(state).some((a) => a.custId === ask.custId)) return;
+    ownerAsks(state).push(ask);
+    if (ownerAsks(state).length === 1) emit(state, out, 'owner', askText(state, ask), { kind: 'owner-ask' });
+  }
+  function askText(state, a) {
+    const more = ownerAsks(state).length > 1 ? '\n(' + (ownerAsks(state).length - 1) + ' aur baaki)' : '';
+    if (a.type === 'vouch') { const c = getCust(state, a.custId), v = getCust(state, c.vouch.by); return '🤝 ' + v.name + ' (aapke grahak, ' + customerScore(state, v.id).label + ') kehte hain woh ' + c.name + ' (+91 ' + c.phone + ') ko jaante hain.\nInka khata ' + rupees(VOUCH.start) + ' ki seema se kholein? Har time par chukane par seema ' + rupees(VOUCH.step) + ' badhegi, ' + rupees(VOUCH.cap) + ' tak.\nJawab: *ok* ya *nahi*' + more; }
+    if (a.type === 'guest') { const c = getCust(state, a.custId); return '📱 Naya number jud gaya: ' + c.name + ' (+91 ' + c.phone + '). Inka khata kholein, taaki udhaar le sakein?\nJawab: *ok* ya *nahi*' + more; }
+    const o = orders(state).find((x) => x.id === a.orderId), c = getCust(state, o.custId);
+    return '🛒 Naya order: ' + c.name + ', ' + (o.mode === 'udhaar' ? 'udhaar par' : 'cash par') + '\n' + orderText(o) + '\nPakka karein? *ok* ya *nahi*' + more;
+  }
+  function answerOwnerAsk(state, yes) {
+    const out = [];
+    const a = ownerAsks(state).shift();
+    if (!a) return out;
+    if (a.type === 'vouch') {
+      const c = getCust(state, a.custId), v = getCust(state, c.vouch.by);
+      if (yes) {
+        delete c.guest; c.limit = VOUCH.start; c.limitSince = state.today;
+        log(state, 'customer', 'Owner opened khata for ' + c.name + ' (vouched by ' + v.name + ', limit ' + rupees(VOUCH.start) + ')');
+        emit(state, out, 'owner', '✅ ' + c.name + ' ka khata khul gaya, seema ' + rupees(VOUCH.start) + '. ' + v.name + ' ki pehchan se.');
+        emit(state, out, c.id, 'Namaste ' + c.name + ' 🙏 ' + v.name + ' ki pehchan se ' + state.shop.name + ' ne aapka khata khola hai. Udhaar seema: ' + rupees(VOUCH.start) + ', har baar time par chukane par badhegi.\nSalary ya stipend kis tareekh ko aati hai? Jaise "1 tareekh ko salary aati hai". Usi din ka wada likhenge.');
+        emit(state, out, v.id, '✅ ' + c.name + ' ka khata khul gaya. Dhanyavaad 🙏');
+      } else { c.vouch.declined = state.today; emit(state, out, 'owner', 'Theek hai. ' + c.name + ' sirf cash par order kar sakte hain.'); }
+    } else if (a.type === 'guest') {
+      const c = getCust(state, a.custId);
+      if (yes) { delete c.guest; log(state, 'customer', 'Owner opened khata for ' + c.name); emit(state, out, 'owner', '✅ ' + c.name + ' ka khata khul gaya. Ab inke order udhaar par bhi aa sakte hain.'); emit(state, out, c.id, '✅ ' + state.shop.name + ' ne aapka khata khol diya. Ab order udhaar par bhi de sakte hain.'); }
+      else emit(state, out, 'owner', 'Theek hai. ' + c.name + ' sirf cash par order kar sakte hain.');
+    } else {
+      const o = orders(state).find((x) => x.id === a.orderId), c = getCust(state, o.custId);
+      if (!yes) { o.status = 'rejected'; emit(state, out, 'owner', '❌ ' + c.name + ' ka order mana kar diya.'); emit(state, out, c.id, '🙏 Maaf kijiye, abhi yeh order nahi ho payega. - ' + state.shop.name); }
+      else if (o.mode === 'udhaar' && !c.guest) {
+        o.status = 'done';
+        const due = nextPayday(state, c) || addDays(state.today, state.shop.defaultDays);
+        const tx = { id: nextId(state, 'T'), custId: c.id, type: 'credit', amount: o.amount, items: o.lines.map((l) => l.name + (qtyText(l) ? ' ' + qtyText(l) : '')).join(', '), date: state.today, dueDate: due, note: 'WhatsApp order', source: 'order', parser: 'rules',
+          lines: o.lines.filter((l) => l.price != null).map((l) => ({ name: l.name, qty: l.qty, unit: l.unit, price: l.price, from: l.from })) };
+        state.txns.push(tx); o.txnId = tx.id; state.lastAction = { txnId: tx.id };
+        if (!c.dueDate || c.dueDate <= state.today) { c.dueDate = due; c.reminderLevel = 0; c.lastReminder = null; }
+        log(state, 'order', c.name + ' order ' + rupees(o.amount) + ' on udhaar');
+        emit(state, out, 'owner', '✅ Order pakka: ' + c.name + ', ' + rupees(o.amount) + ' khate mein likh diya. Kul baaki: ' + rupees(balance(state, c.id)) + '.\nSaaman bhijwa dijiye.' + limitNote(state, c));
+        emit(state, out, c.id, '✅ Order pakka! Saaman aa raha hai. - ' + state.shop.name); // the item-wise bill with Haan / Galat follows, as for every entry
+      } else {
+        o.status = 'done';
+        log(state, 'order', c.name + ' order ' + rupees(o.amount) + ' for cash');
+        emit(state, out, 'owner', '✅ Order pakka: ' + c.name + ', ' + rupees(o.amount) + ' cash par. Khate mein kuch nahi likha.');
+        emit(state, out, c.id, '✅ Order pakka! ' + rupees(o.amount) + ' cash par. Saaman aa raha hai. - ' + state.shop.name);
+      }
+    }
+    if (ownerAsks(state).length) emit(state, out, 'owner', askText(state, ownerAsks(state)[0]), { kind: 'owner-ask' });
+    return out;
+  }
+  function placeOrder(state, c, lines, out) {
+    const amount = lines.reduce((s, l) => s + (l.price || 0), 0);
+    const o = { id: nextId(state, 'O'), custId: c.id, lines, amount, date: state.today, status: c.guest ? 'owner' : 'ask', mode: c.guest ? 'cash' : null };
+    orders(state).push(o);
+    log(state, 'order', c.name + ' ordered ' + rupees(amount));
+    const lim = udhaarLimit(state, c);
+    if (!c.guest && lim != null && Math.max(0, balance(state, c.id)) + amount > lim) {
+      o.status = 'owner'; o.mode = 'cash';
+      emit(state, out, c.id, '🛒 Order mila:\n' + orderText(o) + '\nAapki udhaar seema ' + rupees(lim) + ' hai (abhi baaki ' + rupees(Math.max(0, balance(state, c.id))) + '), isliye yeh order cash par. Time par chukane se seema badhti hai. 🙏');
+      askOwner(state, out, { type: 'order', orderId: o.id });
+      return out;
+    }
+    if (c.guest) {
+      emit(state, out, c.id, '🛒 Order mila:\n' + orderText(o) + '\nCash par ready karenge. Dukaandaar pakka karte hi yahin bata denge. 🙏');
+      askOwner(state, out, { type: 'order', orderId: o.id });
+    } else emit(state, out, c.id, '🛒 Order mila:\n' + orderText(o) + '\nUdhaar mein likhein? *Haan* (khate mein) ya *Nahi* (cash denge)', { kind: 'order-ask', orderId: o.id });
+    return out;
+  }
+  /** The customer's "haan" (udhaar) or "nahi" (cash) on their order. */
+  function answerOrder(state, custId, orderId, udhaar) {
+    const out = [];
+    const o = orders(state).find((x) => x.id === orderId && x.custId === custId && x.status === 'ask');
+    if (!o) return out;
+    o.mode = udhaar ? 'udhaar' : 'cash'; o.status = 'owner';
+    emit(state, out, custId, (udhaar ? '📝 Theek hai, udhaar par.' : '💵 Theek hai, cash par.') + ' Order dukaandaar ke paas hai, pakka karte hi yahin bata denge. 🙏');
+    askOwner(state, out, { type: 'order', orderId: o.id });
+    return out;
+  }
+
   /** Customer replies on WhatsApp ("kal dunga", "Friday tak", "paid kar diya"). The agent negotiates. */
   function handleCustomerMessage(state, custId, text) {
     const out = [];
@@ -3605,6 +4013,28 @@ var qrcode = function() {
     const tok = tokenize(text);
     const due = extractDue(tok, state.today).due;
     const bal = balance(state, c.id);
+    // "kitna baaki hai", "balance", "meri list": the customer gets the hisaab, never a payment-date question
+    if (/\s(kitna|kitana|kitne|kitni|balance|bakaya|hisab|hisaab|list|statement|khata)\s/.test(tok.text) && !/\s(diya|diye|kar diya|bhej diya)\s/.test(tok.text) && !due) {
+      if (Math.round(bal) <= 0) { emit(state, out, c.id, 'Aapka koi baaki nahi hai 🙏 - ' + state.shop.name); return out; }
+      const recent = state.txns.filter((t) => t.custId === c.id && !t.voided).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).slice(-4)
+        .map((t) => '  ' + fmtDate(t.date) + ': ' + rupees(t.amount) + ' ' + typeHi(t) + (t.lines ? '\n' + billText(t.lines) : t.items ? ' (' + t.items + ')' : '')).join('\n');
+      emit(state, out, c.id, '📄 ' + state.shop.name + '\nAapke naam: ' + rupees(Math.round(bal)) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: Math.round(bal) });
+      return out;
+    }
+    const v = !c.guest ? parseVouch(state, text) : null;
+    if (v && v.phone !== c.phone) return handleVouch(state, c, v, out);
+    if (c.limit != null && /\s(salary|selary|salari|stipend|tankha|tanakha|tankhah|pagar|payment ati|paisa ata|paise ate)\s/.test(' ' + tok.text + ' ' + String(text).toLowerCase() + ' ')) {
+      const dm = /\b([12]?\d|3[01])\b/.exec(text);
+      if (dm && +dm[1] >= 1) {
+        c.payday = +dm[1];
+        emit(state, out, c.id, '📅 Theek hai, har mahine ' + c.payday + ' tareekh. Agla wada: ' + fmtDay(nextPayday(state, c)) + '.');
+        if (balance(state, c.id) > 0) { c.dueDate = nextPayday(state, c); c.reminderLevel = 0; }
+        emit(state, out, 'owner', '💬 ' + c.name + ' ki salary ' + c.payday + ' tareekh ko aati hai. Unke wade usi din ke likhunga.');
+        return out;
+      }
+    }
+    const ol = !due ? orderLines(state, text) : [];
+    if (ol.length && ol.some((l) => l.from === 'memory')) return placeOrder(state, c, ol, out);
     if (/\s(cash|nakad|nakd|nagad|naqad|haath me|hath me)\s/.test(tok.text) && !due) {
       const amt = extractAmount(tok, new Set());
       const amount = amt && amt.amount > 0 ? amt.amount : Math.max(0, bal - pendingCash(state, c.id));
@@ -3633,7 +4063,9 @@ var qrcode = function() {
       emit(state, out, 'owner', '💬 ' + c.name + ' abhi ' + rupees(part.amount) + ' dena chahte hain.');
       return out;
     }
-    emit(state, out, c.id, 'Dhanyavaad 🙏 Kab tak de payenge? Jaise "Shukravar ko" ya "5 tareekh".');
+    // a payment date is asked only after a reminder; anything else gets the short menu, and the owner sees the message
+    if (bal > 0 && (c.reminderLevel > 0 || c.lastReminder) && !/^\s*(hi+|hello|helo|hey|namaste|namaskar|ram ram|jai shri krishna|good morning)(\s+ji)?\s*$/.test(tok.text)) emit(state, out, c.id, 'Dhanyavaad 🙏 Kab tak de payenge? Jaise "Shukravar ko" ya "5 tareekh".');
+    else emit(state, out, c.id, 'Namaste 🙏 Aap aise likh sakte hain:\n• "Kitna baaki hai"\n• "Cash de diya"\n• "Shukravar ko dunga"');
     emit(state, out, 'owner', '💬 ' + c.name + ': "' + text + '"');
     return out;
   }
@@ -3874,6 +4306,7 @@ var qrcode = function() {
       shop: { id: 'gupta', name: 'Gupta Kirana Store', owner: 'Rakesh Gupta', upiId: 'guptakirana@upi', city: 'Guwahati' },
       seed: 7,
       // rates the agent already learned from earlier entries: name, rate, unit
+      supplies: [['Agrawal Traders', 14000, 3], ['Hindustan Agency', 3500, 10]], // the shop's own maal udhaar: name, rupees, due in days
       prices: [['cheeni', 45, 'kg'], ['atta', 42, 'kg'], ['chawal', 60, 'kg'], ['tel', 180, 'l'], ['doodh', 30, 'pkt'], ['maggi', 14, ''], ['biscuit', 10, '']],
       people: [
         // name, key, phone, reliability, known UPI IDs
@@ -3971,6 +4404,7 @@ var qrcode = function() {
       c.dueDate = addDays(T, dueIn);
       if (dueIn < 0) { c.lastReminder = addDays(T, dueIn); c.reminderLevel = 1; }
     }
+    for (const [name, amount, dueIn] of cfg.supplies || []) supplies(state).push({ id: nextId(state, 'S'), key: tokenize(name).norm.join(' '), name, amount, paid: 0, date: addDays(T, -10), dueDate: addDays(T, dueIn) });
     for (const [name, rate, unit] of cfg.prices || []) prices(state)[tokenize(name).norm.join(' ')] = { name, rate, unit, date: addDays(T, -3) };
     log(state, 'seed', 'Loaded 75 days of sample khata for ' + state.customers.length + ' customers of ' + state.shop.name);
     return state;
@@ -4007,7 +4441,7 @@ var qrcode = function() {
       overdueAmount: Math.round(overdue.reduce((s, x) => s + x.amount, 0)), overdue,
       collectionRate: dueTotal ? paidTotal / dueTotal : null, onTimeRate: dueTotal ? onTime / dueTotal : null, dueInWindow: Math.round(dueTotal),
       avgDaysToRecover: prof.avgDaysToRecover, pendingCash: pendingClaims.reduce((s, k) => s + k.amount, 0), pendingCount: pendingClaims.length,
-      daily
+      daily, today: (({ owing, payers, ...t }) => t)(todayStats(state)), week: weekStats(state)
     };
   }
 
@@ -4303,8 +4737,55 @@ var qrcode = function() {
   }
   const openChecks = (state, custId) => claims(state).filter((k) => k.type === 'check' && k.status === 'pending' && k.custId === custId).length;
 
+  // ---------------------------------------------- real WhatsApp: who is writing, and short yes/no replies
+  /**
+   * A phone number wrote to the shop's WhatsApp. A known number is that customer; a new number becomes a customer
+   * under their WhatsApp name (or joins the one khata of that name that has no number yet). Only numbers that wrote
+   * first are ever messaged (c.wa), so the agent never cold-messages a number someone typed in.
+   */
+  function customerFromWhatsapp(state, phone, profileName) {
+    let c = state.customers.find((x) => x.phone === phone);
+    if (c) { const fresh = !c.wa; c.wa = true; return welcome(state, c, fresh, false); }
+    const tok = tokenize(String(profileName || '').replace(/[^\p{L}\s.]/gu, ' ').slice(0, 60));
+    const words = tok.norm.map((w, i) => ({ n: w, d: tok.display[i] })).filter((w) => /^[a-z]{2,}$/.test(w.n)).slice(0, 3);
+    const key = words.length ? nameKey(words.map((w) => w.n)) : '';
+    const same = key ? findCustomers(state, key).filter((x) => !x.phone) : [];
+    if (same.length === 1) {
+      c = same[0]; c.phone = phone; c.wa = true;
+      log(state, 'customer', c.name + ' joined on WhatsApp');
+      return welcome(state, c, true, false);
+    }
+    const name = words.length ? prettyName(words.map((w) => w.d)) : 'Grahak ' + phone.slice(-4);
+    // a number nobody knows is not given a khata: it can order for cash until the owner says "ok"
+    c = addCustomer(state, state.customers.some((x) => x.key === key) ? name + ' ' + phone.slice(-4) : name, key || 'grahak ' + phone.slice(-4), { phone, wa: true, guest: true });
+    log(state, 'customer', 'New number on WhatsApp (no khata yet): ' + c.name);
+    return welcome(state, c, true, true);
+  }
+  function welcome(state, c, joined, isNew) {
+    const out = [];
+    if (joined && c.guest) {
+      emit(state, out, c.id, 'Namaste ' + c.name + ' 🙏 Aap ' + state.shop.name + ' se jud gaye.\nOrder bhejiye, jaise "aata 5 kilo, tel 1 litre". Daam aur jod yahin aa jayega.\nUdhaar ka khata dukaandaar ki manzoori se khulta hai.', { kind: 'wa-welcome' });
+      askOwner(state, out, { type: 'guest', custId: c.id });
+    } else if (joined) {
+      emit(state, out, c.id, 'Namaste ' + c.name + ' 🙏 Aap ' + state.shop.name + ' ke khate se jud gaye.\nAb har udhaar ki list aur hisaab yahin aayega, aap "Haan" ya "Galat" bol sakte hain.\nCash de diya ho toh bas likhiye "cash de diya".', { kind: 'wa-welcome' });
+      emit(state, out, 'owner', '📱 ' + c.name + ' WhatsApp par jud gaye' + (isNew ? ' (naya khata). Ab "' + c.name.split(' ')[0] + ' ..." bolkar udhaar likhiye.' : '.'), { kind: 'wa-joined' });
+    }
+    return { cust: c, joined, isNew, out };
+  }
+  /** "haan" / "sahi hai" / ✅ → 'yes', "galat" / "nahi" / ❌ → 'no'. Only short replies count; anything longer is a real message. */
+  function shortAnswer(text) {
+    const s = String(text || '').trim();
+    if (!s || s.split(/\s+/).length > 3) return null;
+    if (/^(✅|👍|☑️|✔️)+$/u.test(s)) return 'yes';
+    if (/^(❌|👎|✖️)+$/u.test(s)) return 'no';
+    const t = ' ' + tokenize(s).norm.join(' ') + ' ';
+    if (/ (galat|glt|wrong|nahi|nahin|nhi|na|no|nope) /.test(t)) return 'no';
+    if (/ (haan|han|ha|haa|haanji|ji|sahi|theek|thik|ok|okay|yes|y|mila|mil|confirm) /.test(t)) return 'yes';
+    return null;
+  }
+
   // ---------- one entry point for every user action (used by the web page and by the per-shop server) ----------
-  const ACTIONS = ['owner', 'upi', 'customer', 'confirm', 'galla', 'closeDay', 'nextDay', 'consentRequest', 'consentAnswer', 'consentRevoke', 'copyRead', 'copyDecide', 'copyConfirmAll', 'statements', 'customerCheck'];
+  const ACTIONS = ['owner', 'upi', 'customer', 'confirm', 'galla', 'closeDay', 'nextDay', 'consentRequest', 'consentAnswer', 'consentRevoke', 'copyRead', 'copyDecide', 'copyConfirmAll', 'statements', 'customerCheck', 'orderAnswer'];
   const looksLikeUpiSms = (t) => /(credited|received|recd)/i.test(t) && /(rs\.?|inr|₹)\s*[\d,]+/i.test(t);
   /** A fresh demo shop with its welcome message. */
   function freshShop(which, today) {
@@ -4346,6 +4827,7 @@ var qrcode = function() {
     else if (action === 'closeDay') result = runEveningSummary(state);
     else if (action === 'nextDay') { result = advanceDay(state); autoAccept(state); }
     else if (action === 'consentRequest') result = requestConsent(state, str(args.custId, 20));
+    else if (action === 'orderAnswer') result = answerOrder(state, str(args.custId, 20), str(args.orderId, 20), !!args.udhaar);
     else if (action === 'consentAnswer') result = answerConsent(state, str(args.custId, 20), !!args.yes);
     else if (action === 'consentRevoke') result = revokeConsent(state, str(args.custId, 20));
     else if (action === 'statements') result = sendStatements(state);
@@ -4373,7 +4855,10 @@ var qrcode = function() {
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier, orderLines, parseVouch, udhaarLimit, nextPayday,
+    // real WhatsApp channel
+    looksLikeCounter, counterIntent,
+    customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),
     // item lines + rate memory
     itemize, learnRates, rateList, billText,
     // utils
@@ -4409,6 +4894,7 @@ var qrcode = function() {
     if (REMOTE) {
       const r = await fetch('api/act', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, args: args || {} }) });
       const j = await r.json().catch(() => ({}));
+      if (r.status === 403 && j.message) throw Object.assign(new Error(j.message), { locked: true });
       if (!r.ok || !j.state) throw new Error(j.error || 'HTTP ' + r.status);
       state = j.state; engineInfo = j.engine; freshTxn = j.freshTxn; return j.result;
     }
@@ -4416,7 +4902,7 @@ var qrcode = function() {
     const out = C.runAction(state, action, args); freshTxn = out.freshTxn; return out.result;
   }
   async function safeAct(action, args) {
-    try { return await act(action, args); } catch (e) { toast('Agent tak baat nahi pahunchi (' + e.message + '). Dobara koshish kijiye.'); return undefined; }
+    try { return await act(action, args); } catch (e) { if (e.locked) { toast(e.message); return undefined; } toast('Agent tak baat nahi pahunchi (' + e.message + '). Dobara koshish kijiye.'); return undefined; }
   }
 
   // ---------- helpers ----------
@@ -4676,6 +5162,10 @@ var qrcode = function() {
     $('kLate').textContent = C.rupees(d.overdueAmount); $('kLateSub').textContent = d.overdue.length ? d.overdue.length + ' log wade se late' : 'koi late nahi';
     $('kRate').textContent = d.collectionRate == null ? '—' : Math.round(d.collectionRate * 100) + '%';
     $('kRateSub').textContent = d.collectionRate == null ? 'pichhle 30 din mein koi wada nahi' : C.rupees(d.dueInWindow) + ' ka wada tha · ' + Math.round(d.onTimeRate * 100) + '% time par';
+    const td = d.today;
+    $('kToday').textContent = 'Aaj: ' + C.rupees(td.newCredit) + ' naya udhaar (' + td.newCreditCount + ') · ' + C.rupees(td.back) + ' wapas (cash ' + C.rupees(td.backCash) + ', UPI ' + C.rupees(td.backUpi) + ')' + (td.disputes ? ' · ❗ ' + td.disputes + ' grahak ne galat bataya' : '');
+    const wk = d.week;
+    if (wk && wk.owed) $('kToday').textContent += '\n📦 Is hafte supplier ko ' + C.rupees(wk.owed) + ' dena · grahakon se ummeed ' + C.rupees(wk.incoming) + (wk.shortfall ? ' · ⚠️ kam padega ' + C.rupees(wk.shortfall) : ' · ✅ pura') + (wk.remindFirst.length ? ' · pehle yaad dilao: ' + wk.remindFirst.map((x) => x.name).join(', ') : '');
     $('kCash').textContent = C.rupees(d.pendingCash); $('kCashSub').textContent = d.pendingCount ? d.pendingCount + ' claim · Dukaan band par ✅/❌' : 'sab confirm';
     $('odList').innerHTML = d.overdue.length ? d.overdue.map((o) => '<li data-c="' + o.id + '" tabindex="0"><span class="ini">' + esc(initial(o.name)) + '</span><span class="nm">' + esc(o.name) + '</span>' +
       '<span class="amt">' + esc(C.rupees(o.amount)) + '</span><span class="st"><span class="late">' + o.daysLate + ' din late</span>' +
@@ -4817,6 +5307,7 @@ var qrcode = function() {
     ['🎙', 'शर्मा जी… (Hindi)', 'शर्मा जी ने 340 का सामान लिया, कल देंगे', 5, 'voice'],
     ['🎙', 'Bill: cheeni, tel, sabun', 'Sharma ji cheeni 2 kilo 90, tel 1 litre 180, sabun 40, kal denge', 7, 'voice'],
     ['🎙', 'Daam yaad se: Pappu', 'Pappu ne 500 gram cheeni, sabun 2 aur adha litre tel liya', 5, 'voice'],
+    ['🎙', 'Dukaan ki baat: Iqbal bhai', 'Aaiye Iqbal bhai. Raju, do kilo atta la, ek litre tel bhi nikal, maggi do. Kitna hua? 290', 14, 'voice'],
     ['🎙', 'aaj ka hisaab', 'Aaj ka hisaab batao', 2, 'voice'],
     ['🎙', 'Pappu ko yaad dilao', 'Pappu ko yaad dila do', 2, 'voice'],
     ['📩', 'Bank SMS forward', 'Rs 700.00 received from MEENA KUMARI via Google Pay on ' + 'today' + '. UPI Ref 551200987654', 0, 'sms'],
@@ -4826,6 +5317,7 @@ var qrcode = function() {
   SAMPLES_BY.balaji = [
     ['🎙', 'Anita bhabhi: doodh, paneer', 'Anita bhabhi ne 2 litre doodh aur paneer liya 160 ka, kal denge', 5, 'voice'],
     ['🎙', 'Daam yaad se: Pinky', 'Pinky didi doodh 2 litre, paneer 200 gram aur bread', 5, 'voice'],
+    ['🎙', 'Dukaan ki baat: Anita bhabhi', 'Aao Anita bhabhi. Chhotu, do packet doodh nikal, paneer 200 gram bhi. Kitna hua? 140', 12, 'voice'],
     ['🎙', 'मिश्रा जी… (Hindi)', 'मिश्रा जी ने 300 का दही और मक्खन लिया, शनिवार को देंगे', 5, 'voice'],
     ['🎙', 'aaj ka hisaab', 'Aaj ka hisaab batao', 2, 'voice'],
     ['🎙', 'Suresh ko yaad dilao', 'Suresh driver ko yaad dila do', 2, 'voice'],
