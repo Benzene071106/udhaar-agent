@@ -52,7 +52,7 @@ function createWhatsapp(o) {
   // (the API answers 21654 "ContentSid Required" for Sandbox senders on newer accounts).
   let capture = null;
   function sendNow(to, body, mediaUrl) {
-    if (capture && capture.open && to === capture.to && body && !mediaUrl) { capture.msgs.push(String(body).slice(0, 1590)); stats.sent++; return Promise.resolve(); }
+    if (capture && capture.open && to === capture.to && (body || mediaUrl)) { capture.msgs.push(mediaUrl ? { media: mediaUrl } : String(body).slice(0, 1590)); stats.sent++; return Promise.resolve(); }
     if (!stats.sending || !to) return Promise.resolve();
     const form = new URLSearchParams({ From: sender, To: 'whatsapp:+' + to });
     if (body) form.set('Body', String(body).slice(0, 1590));
@@ -96,6 +96,13 @@ function createWhatsapp(o) {
     const shop = state.shop.name, bal = Math.max(0, C.balance(state, c.id));
     if (m.kind === 'reminder' && m.amount > 0)
       return 'नमस्ते ' + c.name + '। ' + shop + ' से बोल रहे हैं। आपके खाते में ' + say(m.amount) + ' बाकी हैं। जब सुविधा हो, दुकान पर नकद या UPI से दे दीजिए। पैसे दे दिए हों तो "cash de diya" लिख दीजिए। धन्यवाद।';
+    if (m.kind === 'statement') return 'नमस्ते ' + c.name + '। ' + shop + ' से। आपके खाते में ' + say(bal) + ' बाकी हैं। सही है तो "हाँ" लिखिए, गलत हो तो "गलत"।';
+    if (m.kind === 'order-ask') {
+      const o = (state.orders || []).find((x) => x.id === m.orderId);
+      if (!o) return null;
+      const items = o.lines.filter((l) => l.price != null).map((l) => l.name + (l.qty ? ' ' + l.qty + (l.unit ? ' ' + (UNIT_WORD[l.unit] || l.unit) : '') : '') + ', ' + say(l.price)).join('; ');
+      return 'नमस्ते ' + c.name + '। ' + shop + ' से। आपका ऑर्डर: ' + items + '। कुल ' + say(o.amount) + '। उधार में लिखना हो तो "हाँ" लिखिए, नकद देंगे तो "नहीं"।';
+    }
     if (m.kind === 'entry-check') {
       const t = state.txns.find((x) => x.id === m.txnId);
       if (!t) return null;
@@ -302,7 +309,7 @@ function createWhatsapp(o) {
     return { replied, done };
   }
   function twiml(msgs) {
-    return '<?xml version="1.0" encoding="UTF-8"?><Response>' + msgs.map((m) => '<Message>' + esc(m) + '</Message>').join('') + '</Response>';
+    return '<?xml version="1.0" encoding="UTF-8"?><Response>' + msgs.map((m) => '<Message>' + (m && m.media ? '<Media>' + esc(m.media) + '</Media>' : esc(m)) + '</Message>').join('') + '</Response>';
   }
 
   return { stats, verify, handle, handleForReply, twiml, deliver, payPage, joinPage, getMedia, idle: () => outQueue };

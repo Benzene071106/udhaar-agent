@@ -16,6 +16,8 @@
 //   TWILIO_*, OWNER_WHATSAPP, PUBLIC_URL, STT_*   real WhatsApp and voice notes: see server/whatsapp.js
 //   ACT_LIMIT_PER_MIN      default 30: /api/act calls per minute per visitor IP (the public demo URL is open to anyone)
 //   PHOTO_LIMIT_PER_10MIN  default 5: /api/photo calls per 10 minutes per visitor IP (each one is an AI vision call)
+//   ADMIN_KEY              optional: on a live shop (REAL_CLOCK=1) "reset", "next day" and "close day" from the public page
+//                          need the header x-admin-key with this value; calls from the instance itself always work
 //   WA_REPLY_TWIML         1 = answer the WhatsApp sender inside the webhook reply (TwiML) instead of the Messages API
 //   UDHAAR_ENV_FILE        optional KEY=value file read once at startup (default /home/node/udhaar.env).
 //                          Agent37 cannot pass env vars to an instance, so keys go in this file instead.
@@ -192,6 +194,9 @@ function createServer(opts) {
   // (it is a public demo); this only stops one visitor from hammering the shop. Local calls (no proxy) are not limited.
   const limits = { '/api/act': [+env.ACT_LIMIT_PER_MIN || 30, 60e3], '/api/photo': [+env.PHOTO_LIMIT_PER_10MIN || 5, 600e3] };
   const hits = new Map();
+  const LOCKED = new Set(['reset', 'nextDay', 'closeDay']);
+  const local = (req) => !req.headers['x-forwarded-for'] && /^(::1|127\.|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+  const sameKey = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b)); return x.length === y.length && require('crypto').timingSafeEqual(x, y); };
   function limited(req, route) {
     const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
     const ip = fwd || req.socket.remoteAddress || '';
@@ -255,6 +260,10 @@ function createServer(opts) {
         let body;
         try { body = JSON.parse(await readBody(req) || '{}'); } catch (e) { return send(res, e.code === 413 ? 413 : 400, { error: e.code === 413 ? 'body too large' : 'bad JSON' }); }
         const action = String(body.action || '');
+        // a live shop's khata and clock belong to the shop: a visitor on the public link can try everything else,
+        // but cannot wipe the khata or move its day
+        if (LOCKED.has(action) && env.REAL_CLOCK === '1' && !local(req) && !(env.ADMIN_KEY && sameKey(req.headers['x-admin-key'], env.ADMIN_KEY)))
+          return send(res, 403, { error: 'locked', message: 'Yeh asli dukaan ka khata hai: "' + (action === 'reset' ? 'Demo dobara shuru' : action === 'nextDay' ? 'Agle din' : 'Dukaan band') + '" yahan band hai. Baaki sab aazmaiye 🙏' });
         const out = await serial(async () => {
           const from = state.messages.length, before = state;
           const r = await act(action, body.args || {});

@@ -4886,6 +4886,7 @@ var qrcode = function() {
     if (REMOTE) {
       const r = await fetch('api/act', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, args: args || {} }) });
       const j = await r.json().catch(() => ({}));
+      if (r.status === 403 && j.message) throw Object.assign(new Error(j.message), { locked: true });
       if (!r.ok || !j.state) throw new Error(j.error || 'HTTP ' + r.status);
       state = j.state; engineInfo = j.engine; freshTxn = j.freshTxn; return j.result;
     }
@@ -4893,7 +4894,7 @@ var qrcode = function() {
     const out = C.runAction(state, action, args); freshTxn = out.freshTxn; return out.result;
   }
   async function safeAct(action, args) {
-    try { return await act(action, args); } catch (e) { toast('Agent tak baat nahi pahunchi (' + e.message + '). Dobara koshish kijiye.'); return undefined; }
+    try { return await act(action, args); } catch (e) { if (e.locked) { toast(e.message); return undefined; } toast('Agent tak baat nahi pahunchi (' + e.message + '). Dobara koshish kijiye.'); return undefined; }
   }
 
   // ---------- helpers ----------

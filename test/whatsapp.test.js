@@ -312,3 +312,27 @@ test('WhatsApp order: the customer orders, says haan for udhaar, the owner says 
     assert.equal(server.getState().txns.length, before + 1);
   } finally { server.close(); }
 });
+
+test('WA_REPLY_TWIML=1 + ElevenLabs: the customer\'s answer carries the Hindi voice note in the same reply, text first', async () => {
+  const { server, fetch: tw } = waServer({ WA_REPLY_TWIML: '1', ELEVENLABS_API_KEY: 'el-key' });
+  const base = await listen(server);
+  try {
+    await inbound(base, server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    await inbound(base, server, { From: from(OWNER), Body: 'Rohit ne 340 ka saaman liya, kal denge' });
+    tw.clear();
+    const r = await inbound(base, server, { From: from(JUDGE), Body: 'kitna baaki hai' });
+    const xml = await r.text();
+    assert.match(xml, /<Message>📄[^<]*₹340 baaki[^<]*<\/Message><Message><Media>https:\/\/[^<]*\/media\/[0-9a-f]+\.mp3<\/Media><\/Message>/);
+    assert.deepEqual(tw.to(JUDGE), [], 'nothing for the sender goes through the API');
+    const tts = tw.calls.filter((c) => c.url.includes('/v1/text-to-speech/'));
+    assert.match(JSON.parse(tts[tts.length - 1].init.body).text, /340 रुपये बाकी/);
+  } finally { server.close(); }
+  // no key: text only, as before
+  const plain = waServer({ WA_REPLY_TWIML: '1' });
+  const b2 = await listen(plain.server);
+  try {
+    await inbound(b2, plain.server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    await inbound(b2, plain.server, { From: from(OWNER), Body: 'Rohit ne 340 ka saaman liya, kal denge' });
+    assert.doesNotMatch(await (await inbound(b2, plain.server, { From: from(JUDGE), Body: 'kitna baaki hai' })).text(), /<Media>/);
+  } finally { plain.server.close(); }
+});

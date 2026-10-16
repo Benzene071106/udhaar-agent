@@ -252,3 +252,21 @@ test('public visitors are rate limited on /api/act; local calls are not', async 
     assert.deepEqual([await post(), await post(), await post()], [200, 200, 200], 'local calls are not limited');
   } finally { srv.close(); }
 });
+
+test('a live shop (REAL_CLOCK=1): a public visitor cannot reset the khata or move its day', async () => {
+  const srv = createServer({ env: { SHOP: 'gupta', DATA_DIR: tmpDir(), REAL_CLOCK: '1', ADMIN_KEY: 'owner-secret' }, today: () => TODAY });
+  const base = await listen(srv);
+  try {
+    const post = (action, headers) => fetch(base + '/api/act', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ action, args: action === 'owner' ? { text: 'Sharma ji ka kitna baaki hai' } : {} }) });
+    const pub = { 'x-forwarded-for': '1.2.3.4' };
+    for (const a of ['reset', 'nextDay', 'closeDay']) {
+      const r = await post(a, pub);
+      assert.equal(r.status, 403, a);
+      assert.match((await r.json()).message, /asli dukaan/);
+    }
+    assert.equal((await post('owner', pub)).status, 200, 'everything else stays open');
+    assert.equal((await post('reset', { ...pub, 'x-admin-key': 'wrong' })).status, 403);
+    assert.equal((await post('reset', { ...pub, 'x-admin-key': 'owner-secret' })).status, 200);
+    assert.equal((await post('reset', {})).status, 200, 'the instance itself can always reset');
+  } finally { srv.close(); }
+});
