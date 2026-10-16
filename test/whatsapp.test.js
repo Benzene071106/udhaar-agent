@@ -66,8 +66,8 @@ test('the stage demo: a judge joins, gets an item-wise bill, says haan, pays cas
     // 1. a new number says hi and becomes a customer under its WhatsApp name
     let r = await inbound(base, server, { From: from(JUDGE), ProfileName: 'Rohit Sharma 🔥', Body: 'hi' });
     assert.equal(r.status, 200);
-    assert.match(tw.to(JUDGE)[0], /Namaste Rohit Sharma 🙏 Aap .* khate se jud gaye/);
-    assert.match(tw.to(OWNER)[0], /Rohit Sharma WhatsApp par jud gaye \(naya khata\)/);
+    assert.match(tw.to(JUDGE)[0], /Namaste Rohit Sharma 🙏 Aap .* se jud gaye/);
+    assert.match(tw.to(OWNER)[0], /Naya number jud gaya: Rohit Sharma .*khata kholein/);
     const rohit = server.getState().customers.find((c) => c.phone === '9812345678');
     assert.ok(rohit && rohit.wa);
     tw.clear();
@@ -263,9 +263,9 @@ test('WA_REPLY_TWIML=1: the sender gets the answer inside the webhook reply, oth
     assert.equal(r.status, 200);
     assert.match(r.headers.get('content-type'), /text\/xml/);
     const xml = await r.text();
-    assert.match(xml, /^<\?xml[^>]*><Response><Message>Namaste Rohit 🙏 Aap .* khate se jud gaye/);
+    assert.match(xml, /^<\?xml[^>]*><Response><Message>Namaste Rohit 🙏 Aap .* se jud gaye/);
     assert.deepEqual(tw.to(JUDGE), [], 'the sender is not also messaged through the API');
-    assert.match(tw.to(OWNER)[0], /Rohit WhatsApp par jud gaye/);
+    assert.match(tw.to(OWNER)[0], /Naya number jud gaya: Rohit /);
     const o = await inbound(base, server, { From: from(OWNER), Body: 'Rohit ne 340 ka saaman liya, kal denge' });
     assert.match(await o.text(), /<Message>[^<]*340/);
     assert.equal(server.getState().customers.find((c) => c.name === 'Rohit').phone, JUDGE.slice(-10));
@@ -294,4 +294,21 @@ test('WA_REPLY_TWIML=1: the owner is told when a bill did not reach the customer
     assert.match(xml, /Rohit ko WhatsApp par bhej rahe hain/);
     assert.match(xml, /WhatsApp nahi pahuncha: Rohit\./);
   } finally { f.server.close(); }
+});
+
+test('WhatsApp order: the customer orders, says haan for udhaar, the owner says ok, and it is in the khata', async () => {
+  const { server } = waServer({ WA_REPLY_TWIML: '1' });
+  const base = await listen(server);
+  try {
+    await inbound(base, server, { From: from(JUDGE), ProfileName: 'Rohit', Body: 'hi' });
+    await inbound(base, server, { From: from(OWNER), Body: 'Rohit ne cheeni 2 kilo 90 liya' }); // opens the khata, teaches the rate
+    const o = await inbound(base, server, { From: from(JUDGE), Body: 'cheeni 1 kilo bhej do' });
+    assert.match(await o.text(), /Cheeni 1 kilo = ₹45[^]*Udhaar mein likhein/);
+    const h = await inbound(base, server, { From: from(JUDGE), Body: 'haan' });
+    assert.match(await h.text(), /udhaar par\. Order dukaandaar ke paas hai/);
+    const before = server.getState().txns.length;
+    const ok = await inbound(base, server, { From: from(OWNER), Body: 'ok' });
+    assert.match(await ok.text(), /Order pakka: Rohit, ₹45 khate mein likh diya/);
+    assert.equal(server.getState().txns.length, before + 1);
+  } finally { server.close(); }
 });

@@ -614,3 +614,64 @@ test('supplier udhaar: recorded, paid, and set against what customers will likel
   C.runAction(s, 'owner', { text: 'Pappu se 100 mila' });
   assert.strictEqual(s.txns[s.txns.length - 1].type, 'payment');
 });
+
+test('customer order on WhatsApp: priced from memory, udhaar or cash, and one "ok" from the owner writes it', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const v = s.customers.find((c) => c.name === 'Verma ji');
+  const before = s.txns.length, bal = C.balance(s, v.id);
+  const msgs = (n, to) => s.messages.slice(n).filter((m) => m.from === 'agent' && (!to || m.to === to));
+  let n = s.messages.length;
+  C.runAction(s, 'customer', { custId: v.id, text: 'aata 5 kilo, tel 1 litre, maggi 4 bhej do' });
+  const ask = msgs(n, v.id)[0];
+  assert.strictEqual(ask.kind, 'order-ask');
+  assert.match(ask.text, /Aata 5 kilo = ₹210\n.*Tel 1 litre = ₹180\n.*Maggi ×4 = ₹56\n.*Jod: ₹446/);
+  assert.match(ask.text, /Udhaar mein likhein\?/);
+  assert.strictEqual(s.txns.length, before, 'nothing written before the owner says ok');
+  n = s.messages.length;
+  C.runAction(s, 'orderAnswer', { custId: v.id, orderId: ask.orderId, udhaar: true });
+  assert.match(msgs(n, 'owner')[0].text, /Naya order: Verma ji, udhaar par[^]*Pakka karein\?/);
+  // the open order rides along under any other owner reply until it is answered
+  n = s.messages.length;
+  C.runAction(s, 'owner', { text: 'Pappu ne 100 jama kiye' });
+  assert.ok(msgs(n, 'owner').some((m) => m.kind === 'owner-ask'));
+  n = s.messages.length;
+  C.runAction(s, 'owner', { text: 'ok' });
+  const t = s.txns[s.txns.length - 1];
+  assert.strictEqual(t.custId, v.id); assert.strictEqual(t.amount, 446); assert.strictEqual(t.source, 'order');
+  assert.strictEqual(C.balance(s, v.id), bal + 446);
+  assert.match(msgs(n, 'owner')[0].text, /Order pakka: Verma ji, ₹446 khate mein likh diya/);
+  assert.strictEqual(msgs(n, v.id).filter((m) => m.kind === 'entry-check').length, 1, 'one bill with Haan / Galat');
+  // "nahi" from the customer means cash: no khata entry
+  C.runAction(s, 'customer', { custId: v.id, text: 'cheeni 2 kilo' });
+  C.runAction(s, 'orderAnswer', { custId: v.id, orderId: s.orders[s.orders.length - 1].id, udhaar: false });
+  const k = s.txns.length;
+  n = s.messages.length;
+  C.runAction(s, 'owner', { text: 'haan' });
+  assert.strictEqual(s.txns.length, k);
+  assert.match(msgs(n, 'owner')[0].text, /cash par\. Khate mein kuch nahi likha/);
+  // ordinary chat is not an order
+  n = s.messages.length;
+  C.runAction(s, 'customer', { custId: v.id, text: 'Sharma ji kaise ho' });
+  assert.ok(!msgs(n, v.id).some((m) => m.kind === 'order-ask'));
+});
+test('a number nobody knows gets no khata until the owner says ok; it can still order for cash', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const j = C.customerFromWhatsapp(s, '9811111111', 'Rahul Kumar');
+  assert.strictEqual(j.cust.guest, true);
+  assert.match(s.messages.find((m) => m.to === 'owner' && m.kind === 'owner-ask').text, /Naya number jud gaya: Rahul Kumar[^]*khata kholein/);
+  C.runAction(s, 'customer', { custId: j.cust.id, text: '2 packet doodh, bread' });
+  const o = s.orders[s.orders.length - 1];
+  assert.strictEqual(o.mode, 'cash'); assert.strictEqual(o.status, 'owner');
+  assert.ok(!s.messages.some((m) => m.to === j.cust.id && m.kind === 'order-ask'), 'a guest is never offered udhaar');
+  C.runAction(s, 'owner', { text: 'nahi' }); // no khata
+  assert.strictEqual(j.cust.guest, true);
+  const k = s.txns.length;
+  C.runAction(s, 'owner', { text: 'ok' }); // the cash order
+  assert.strictEqual(s.txns.length, k);
+  assert.strictEqual(o.status, 'done');
+  // the owner writing udhaar for them is the owner's own yes
+  const g = C.customerFromWhatsapp(s, '9822222222', 'Neha');
+  C.runAction(s, 'owner', { text: 'Neha ne 150 ka saaman liya' });
+  assert.strictEqual(g.cust.guest, undefined);
+  assert.strictEqual((s.ownerAsks || []).length, 0, 'the stale question is dropped');
+});

@@ -709,6 +709,7 @@
       case 'credit': {
         // a new entry keeps an existing future promise, but never inherits a date that has already passed
         const due = intent.dueDate || (cust.dueDate && cust.dueDate > state.today && balance(state, cust.id) > 0 ? cust.dueDate : addDays(state.today, state.shop.defaultDays));
+        if (cust.guest) { delete cust.guest; log(state, 'customer', 'Owner opened khata for ' + cust.name + ' by writing udhaar'); }
         const tx = { id: nextId(state, 'T'), custId: cust.id, type: 'credit', amount: intent.amount, items: intent.items || '', date: state.today, dueDate: due, note: intent.raw || '', source: intent.source || 'text', parser: intent.parser || 'rules' };
         if (intent.lines) tx.lines = intent.lines.map((l) => ({ name: l.name, qty: l.qty, unit: l.unit, price: l.price, from: l.from }));
         state.txns.push(tx);
@@ -864,6 +865,9 @@
   function handleOwnerMessage(state, text, opts) {
     opts = opts || {};
     recordOwnerMessage(state, text, opts.source);
+    pruneAsks(state);
+    const yn = shortAnswer(text);
+    if (yn && ownerAsks(state).length && !state.pending) return { intent: { intent: 'owner-ask' }, messages: answerOwnerAsk(state, yn === 'yes') };
     if (!state.pending) {
       const sp = parseSupplier(state, text);
       if (sp) { const out = []; applySupplier(state, sp, (t) => emit(state, out, 'owner', t, { kind: 'supplier' })); return { intent: { intent: 'supplier' }, messages: out }; }
@@ -883,6 +887,9 @@
       intent.items = bill.lines.filter((l) => l.from !== 'extra').map((l) => l.name + (qtyText(l) ? ' ' + qtyText(l) : '')).join(', ');
     } else if (bill && bill.missing && intent.nameKey) { intent.intent = 'need_rate'; intent.missing = bill.missing; }
     const out = applyIntent(state, intent);
+    pruneAsks(state);
+    // an open order or new number is never lost: it rides along under whatever the owner asked
+    if (ownerAsks(state).length && !out.some((m) => m.kind === 'owner-ask')) emit(state, out, 'owner', askText(state, ownerAsks(state)[0]), { kind: 'owner-ask' });
     return { intent, messages: dedupe(out) };
   }
   const dedupe = (arr) => arr.filter((m, i) => arr.indexOf(m) === i);
@@ -1055,6 +1062,98 @@
     return out;
   }
 
+  // ------------------------------------------------------------ customer orders (the Blinkit answer)
+  // A customer sends the list ("aata 5 kilo, tel 1 litre"); the agent prices it from the shop's own rate memory and
+  // asks "udhaar mein likhein?". The owner says one "ok" and it becomes a khata entry. Only people already in the khata
+  // are offered udhaar; a new number orders for cash until the owner opens their khata.
+  const orders = (state) => (state.orders = state.orders || []);
+  const ORDER_FILLER = new Set(['order', 'chahiye', 'chahie', 'bhej', 'bhejo', 'bhejna', 'bhejiye', 'bhijwa', 'bhijwado', 'dena', 'dijiye', 'de', 'do', 'please', 'plz', 'ghar', 'pe', 'par', 'likh', 'likhna', 'likhdo', 'khate', 'khata', 'mein', 'me', 'aur', 'bhi', 'jaldi', 'abhi', 'mujhe', 'humko', 'hume'].map(normWord));
+  function orderLines(state, text) {
+    const lines = [];
+    for (const l of parseLines(tokenize(text), new Set()).lines) {
+      const keep = l.key.split(' ').map((k, i) => [k, l.name.split(' ')[i]]).filter(([k]) => k && !ORDER_FILLER.has(k));
+      if (!keep.length) continue;
+      const x = { name: keep.map((w) => w[1]).join(' '), key: keep.map((w) => w[0]).join(' '), qty: l.qty, unit: l.unit, price: null, from: null };
+      if (l.price != null && x.qty == null) x.qty = l.price; // a customer says how many, never the price: "maggi 4"
+      const r = rateFor(state, x);
+      if (r) { x.price = r.price; x.rate = r.rate; x.rateUnit = r.unit; x.from = 'memory'; }
+      lines.push(x);
+    }
+    return lines;
+  }
+  function orderText(o) {
+    return o.lines.map((l) => '  • ' + cap(l.name) + (qtyText(l) ? ' ' + qtyText(l) : '') + (l.price != null ? ' = ' + rupees(l.price) : ' (daam dukaan par)')).join('\n') +
+      '\n  Jod: ' + rupees(o.amount) + (o.lines.some((l) => l.price == null) ? ' + jinka daam nahi pata' : '');
+  }
+  /** The owner's open questions (new numbers, orders), oldest first; the first is what "ok" / "nahi" answers. */
+  const ownerAsks = (state) => (state.ownerAsks = state.ownerAsks || []);
+  /** Drop questions that no longer need an answer: a number whose khata the owner opened by writing udhaar, an order already settled. */
+  function pruneAsks(state) {
+    state.ownerAsks = ownerAsks(state).filter((a) => a.type === 'guest' ? (getCust(state, a.custId) || {}).guest : (orders(state).find((o) => o.id === a.orderId) || {}).status === 'owner');
+  }
+  function askOwner(state, out, ask) {
+    ownerAsks(state).push(ask);
+    if (ownerAsks(state).length === 1) emit(state, out, 'owner', askText(state, ask), { kind: 'owner-ask' });
+  }
+  function askText(state, a) {
+    const more = ownerAsks(state).length > 1 ? '\n(' + (ownerAsks(state).length - 1) + ' aur baaki)' : '';
+    if (a.type === 'guest') { const c = getCust(state, a.custId); return '📱 Naya number jud gaya: ' + c.name + ' (+91 ' + c.phone + '). Inka khata kholein, taaki udhaar le sakein?\nJawab: *ok* ya *nahi*' + more; }
+    const o = orders(state).find((x) => x.id === a.orderId), c = getCust(state, o.custId);
+    return '🛒 Naya order: ' + c.name + ', ' + (o.mode === 'udhaar' ? 'udhaar par' : 'cash par') + '\n' + orderText(o) + '\nPakka karein? *ok* ya *nahi*' + more;
+  }
+  function answerOwnerAsk(state, yes) {
+    const out = [];
+    const a = ownerAsks(state).shift();
+    if (!a) return out;
+    if (a.type === 'guest') {
+      const c = getCust(state, a.custId);
+      if (yes) { delete c.guest; log(state, 'customer', 'Owner opened khata for ' + c.name); emit(state, out, 'owner', '✅ ' + c.name + ' ka khata khul gaya. Ab inke order udhaar par bhi aa sakte hain.'); emit(state, out, c.id, '✅ ' + state.shop.name + ' ne aapka khata khol diya. Ab order udhaar par bhi de sakte hain.'); }
+      else emit(state, out, 'owner', 'Theek hai. ' + c.name + ' sirf cash par order kar sakte hain.');
+    } else {
+      const o = orders(state).find((x) => x.id === a.orderId), c = getCust(state, o.custId);
+      if (!yes) { o.status = 'rejected'; emit(state, out, 'owner', '❌ ' + c.name + ' ka order mana kar diya.'); emit(state, out, c.id, '🙏 Maaf kijiye, abhi yeh order nahi ho payega. - ' + state.shop.name); }
+      else if (o.mode === 'udhaar' && !c.guest) {
+        o.status = 'done';
+        const due = addDays(state.today, state.shop.defaultDays);
+        const tx = { id: nextId(state, 'T'), custId: c.id, type: 'credit', amount: o.amount, items: o.lines.map((l) => l.name + (qtyText(l) ? ' ' + qtyText(l) : '')).join(', '), date: state.today, dueDate: due, note: 'WhatsApp order', source: 'order', parser: 'rules',
+          lines: o.lines.filter((l) => l.price != null).map((l) => ({ name: l.name, qty: l.qty, unit: l.unit, price: l.price, from: l.from })) };
+        state.txns.push(tx); o.txnId = tx.id; state.lastAction = { txnId: tx.id };
+        if (!c.dueDate || c.dueDate <= state.today) { c.dueDate = due; c.reminderLevel = 0; c.lastReminder = null; }
+        log(state, 'order', c.name + ' order ' + rupees(o.amount) + ' on udhaar');
+        emit(state, out, 'owner', '✅ Order pakka: ' + c.name + ', ' + rupees(o.amount) + ' khate mein likh diya. Kul baaki: ' + rupees(balance(state, c.id)) + '.\nSaaman bhijwa dijiye.');
+        emit(state, out, c.id, '✅ Order pakka! Saaman aa raha hai. - ' + state.shop.name); // the item-wise bill with Haan / Galat follows, as for every entry
+      } else {
+        o.status = 'done';
+        log(state, 'order', c.name + ' order ' + rupees(o.amount) + ' for cash');
+        emit(state, out, 'owner', '✅ Order pakka: ' + c.name + ', ' + rupees(o.amount) + ' cash par. Khate mein kuch nahi likha.');
+        emit(state, out, c.id, '✅ Order pakka! ' + rupees(o.amount) + ' cash par. Saaman aa raha hai. - ' + state.shop.name);
+      }
+    }
+    if (ownerAsks(state).length) emit(state, out, 'owner', askText(state, ownerAsks(state)[0]), { kind: 'owner-ask' });
+    return out;
+  }
+  function placeOrder(state, c, lines, out) {
+    const amount = lines.reduce((s, l) => s + (l.price || 0), 0);
+    const o = { id: nextId(state, 'O'), custId: c.id, lines, amount, date: state.today, status: c.guest ? 'owner' : 'ask', mode: c.guest ? 'cash' : null };
+    orders(state).push(o);
+    log(state, 'order', c.name + ' ordered ' + rupees(amount));
+    if (c.guest) {
+      emit(state, out, c.id, '🛒 Order mila:\n' + orderText(o) + '\nCash par ready karenge. Dukaandaar pakka karte hi yahin bata denge. 🙏');
+      askOwner(state, out, { type: 'order', orderId: o.id });
+    } else emit(state, out, c.id, '🛒 Order mila:\n' + orderText(o) + '\nUdhaar mein likhein? *Haan* (khate mein) ya *Nahi* (cash denge)', { kind: 'order-ask', orderId: o.id });
+    return out;
+  }
+  /** The customer's "haan" (udhaar) or "nahi" (cash) on their order. */
+  function answerOrder(state, custId, orderId, udhaar) {
+    const out = [];
+    const o = orders(state).find((x) => x.id === orderId && x.custId === custId && x.status === 'ask');
+    if (!o) return out;
+    o.mode = udhaar ? 'udhaar' : 'cash'; o.status = 'owner';
+    emit(state, out, custId, (udhaar ? '📝 Theek hai, udhaar par.' : '💵 Theek hai, cash par.') + ' Order dukaandaar ke paas hai, pakka karte hi yahin bata denge. 🙏');
+    askOwner(state, out, { type: 'order', orderId: o.id });
+    return out;
+  }
+
   /** Customer replies on WhatsApp ("kal dunga", "Friday tak", "paid kar diya"). The agent negotiates. */
   function handleCustomerMessage(state, custId, text) {
     const out = [];
@@ -1071,6 +1170,8 @@
       emit(state, out, c.id, '📄 ' + state.shop.name + '\nAapke naam: ' + rupees(Math.round(bal)) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: Math.round(bal) });
       return out;
     }
+    const ol = !due ? orderLines(state, text) : [];
+    if (ol.length && ol.some((l) => l.from === 'memory')) return placeOrder(state, c, ol, out);
     if (/\s(cash|nakad|nakd|nagad|naqad|haath me|hath me)\s/.test(tok.text) && !due) {
       const amt = extractAmount(tok, new Set());
       const amount = amt && amt.amount > 0 ? amt.amount : Math.max(0, bal - pendingCash(state, c.id));
@@ -1792,13 +1893,17 @@
       return welcome(state, c, true, false);
     }
     const name = words.length ? prettyName(words.map((w) => w.d)) : 'Grahak ' + phone.slice(-4);
-    c = addCustomer(state, state.customers.some((x) => x.key === key) ? name + ' ' + phone.slice(-4) : name, key || 'grahak ' + phone.slice(-4), { phone, wa: true });
-    log(state, 'customer', 'New khata from WhatsApp: ' + c.name);
+    // a number nobody knows is not given a khata: it can order for cash until the owner says "ok"
+    c = addCustomer(state, state.customers.some((x) => x.key === key) ? name + ' ' + phone.slice(-4) : name, key || 'grahak ' + phone.slice(-4), { phone, wa: true, guest: true });
+    log(state, 'customer', 'New number on WhatsApp (no khata yet): ' + c.name);
     return welcome(state, c, true, true);
   }
   function welcome(state, c, joined, isNew) {
     const out = [];
-    if (joined) {
+    if (joined && c.guest) {
+      emit(state, out, c.id, 'Namaste ' + c.name + ' 🙏 Aap ' + state.shop.name + ' se jud gaye.\nOrder bhejiye, jaise "aata 5 kilo, tel 1 litre". Daam aur jod yahin aa jayega.\nUdhaar ka khata dukaandaar ki manzoori se khulta hai.', { kind: 'wa-welcome' });
+      askOwner(state, out, { type: 'guest', custId: c.id });
+    } else if (joined) {
       emit(state, out, c.id, 'Namaste ' + c.name + ' 🙏 Aap ' + state.shop.name + ' ke khate se jud gaye.\nAb har udhaar ki list aur hisaab yahin aayega, aap "Haan" ya "Galat" bol sakte hain.\nCash de diya ho toh bas likhiye "cash de diya".', { kind: 'wa-welcome' });
       emit(state, out, 'owner', '📱 ' + c.name + ' WhatsApp par jud gaye' + (isNew ? ' (naya khata). Ab "' + c.name.split(' ')[0] + ' ..." bolkar udhaar likhiye.' : '.'), { kind: 'wa-joined' });
     }
@@ -1817,7 +1922,7 @@
   }
 
   // ---------- one entry point for every user action (used by the web page and by the per-shop server) ----------
-  const ACTIONS = ['owner', 'upi', 'customer', 'confirm', 'galla', 'closeDay', 'nextDay', 'consentRequest', 'consentAnswer', 'consentRevoke', 'copyRead', 'copyDecide', 'copyConfirmAll', 'statements', 'customerCheck'];
+  const ACTIONS = ['owner', 'upi', 'customer', 'confirm', 'galla', 'closeDay', 'nextDay', 'consentRequest', 'consentAnswer', 'consentRevoke', 'copyRead', 'copyDecide', 'copyConfirmAll', 'statements', 'customerCheck', 'orderAnswer'];
   const looksLikeUpiSms = (t) => /(credited|received|recd)/i.test(t) && /(rs\.?|inr|₹)\s*[\d,]+/i.test(t);
   /** A fresh demo shop with its welcome message. */
   function freshShop(which, today) {
@@ -1859,6 +1964,7 @@
     else if (action === 'closeDay') result = runEveningSummary(state);
     else if (action === 'nextDay') { result = advanceDay(state); autoAccept(state); }
     else if (action === 'consentRequest') result = requestConsent(state, str(args.custId, 20));
+    else if (action === 'orderAnswer') result = answerOrder(state, str(args.custId, 20), str(args.orderId, 20), !!args.udhaar);
     else if (action === 'consentAnswer') result = answerConsent(state, str(args.custId, 20), !!args.yes);
     else if (action === 'consentRevoke') result = revokeConsent(state, str(args.custId, 20));
     else if (action === 'statements') result = sendStatements(state);
@@ -1886,7 +1992,7 @@
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier, orderLines,
     // real WhatsApp channel
     looksLikeCounter, counterIntent,
     customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),

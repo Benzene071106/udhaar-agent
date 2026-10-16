@@ -156,7 +156,7 @@ function createWhatsapp(o) {
       else if (m.to !== 'owner' && capture && capture.open) { const k = state.customers.find((x) => x.id === m.to); if (k) capture.skipped.push(k.name); }
     }
     const next = C.pendingClaims(state)[0];
-    if (next && state.waAsked !== next.id && !skipOwner) {
+    if (next && state.waAsked !== next.id && !skipOwner && !(state.ownerAsks || []).length) { // one question to the owner at a time
       state.waAsked = next.id;
       queueSend(ownerTo, '⏳ ' + C.claimLabel(state, next) + '\nJawab: *haan* ✅ ya *nahi* ❌' + (C.pendingClaims(state).length > 1 ? ' (' + C.pendingClaims(state).length + ' baaki)' : ''));
     }
@@ -197,6 +197,7 @@ function createWhatsapp(o) {
     for (let i = state.messages.length - 1; i >= 0; i--) {
       const m = state.messages[i];
       if (m.to !== cust.id || m.from !== 'agent') continue;
+      if (m.kind === 'order-ask') { const o = (state.orders || []).find((x) => x.id === m.orderId); return o && o.status === 'ask' ? { kind: 'order', orderId: o.id } : null; }
       if (m.kind === 'consent-ask') return C.consentOf(state, cust.id).status === 'requested' ? { kind: 'consent' } : null;
       if (m.kind === 'entry-check' || m.kind === 'statement') {
         if (!m.answer || (m.answer === 'auto' && answer === 'no')) return { kind: 'check', msgId: m.id };
@@ -230,7 +231,7 @@ function createWhatsapp(o) {
     if (from === owner) {
       const open = C.pendingClaims(state), yn = C.shortAnswer(text);
       const ask = open.find((k) => k.id === state.waAsked) || open[0];
-      if (yn && ask && !state.pending) await act('confirm', { claimId: ask.id, ok: yn === 'yes' });
+      if (yn && ask && !state.pending && !(state.ownerAsks || []).length) await act('confirm', { claimId: ask.id, ok: yn === 'yes' });
       else if (text) await act('owner', { text, source: audio ? 'voice' : 'text' });
       state = getState();
       return deliver(state, Math.min(start, state.messages.length), pre);
@@ -245,7 +246,8 @@ function createWhatsapp(o) {
       if (!text || /^(hi|hii+|hello|helo|hey|namaste|namaskar|join\b.*|start)\W*$/i.test(text)) return deliver(state, start);
     }
     const yn = C.shortAnswer(text), q = yn && openQuestion(state, cust, yn);
-    if (q && q.kind === 'consent') await act('consentAnswer', { custId: cust.id, yes: yn === 'yes' });
+    if (q && q.kind === 'order') await act('orderAnswer', { custId: cust.id, orderId: q.orderId, udhaar: yn === 'yes' });
+    else if (q && q.kind === 'consent') await act('consentAnswer', { custId: cust.id, yes: yn === 'yes' });
     else if (q) await act('customerCheck', { custId: cust.id, msgId: q.msgId, ok: yn === 'yes' });
     else if (text) await act('customer', { custId: cust.id, text });
     state = getState();
