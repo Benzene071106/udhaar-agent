@@ -675,3 +675,54 @@ test('a number nobody knows gets no khata until the owner says ok; it can still 
   assert.strictEqual(g.cust.guest, undefined);
   assert.strictEqual((s.ownerAsks || []).length, 0, 'the stale question is dropped');
 });
+
+test('naye log: a khata customer vouches, the owner says ok, a small limit grows with on-time repayment', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const v = s.customers.find((c) => c.name === 'Verma ji');
+  let n = s.messages.length;
+  C.runAction(s, 'customer', { custId: v.id, text: 'Rahul 9876512345 mera roommate hai, main jaanta hoon' });
+  const r = s.customers.find((c) => c.phone === '9876512345');
+  assert.strictEqual(r.guest, true, 'no khata before the owner says ok');
+  assert.match(s.messages.slice(n).find((m) => m.to === v.id).text, /Aap par koi udhaar nahi aayega/);
+  assert.match(s.messages.slice(n).find((m) => m.to === 'owner').text, /Verma ji .* kehte hain woh Rahul \(\+91 9876512345\) ko jaante hain[^]*₹300 ki seema/);
+  C.runAction(s, 'owner', { text: 'ok' });
+  assert.strictEqual(r.guest, undefined);
+  assert.strictEqual(C.udhaarLimit(s, r), 300);
+  // the due date is the salary day the newcomer gives
+  C.runAction(s, 'customer', { custId: r.id, text: '1 tareekh ko salary aati hai' });
+  assert.strictEqual(C.nextPayday(s, r), '2026-11-01');
+  // over the limit, an order is cash only
+  C.runAction(s, 'customer', { custId: r.id, text: 'aata 5 kilo, tel 1 litre' });
+  assert.strictEqual(s.orders[s.orders.length - 1].mode, 'cash');
+  assert.match(s.messages[s.messages.length - 2].text + s.messages[s.messages.length - 1].text, /seema ₹300/);
+  C.runAction(s, 'owner', { text: 'nahi' });
+  // within it, udhaar, due on payday
+  C.runAction(s, 'customer', { custId: r.id, text: 'maggi 4, cheeni 1 kilo' });
+  C.runAction(s, 'orderAnswer', { custId: r.id, orderId: s.orders[s.orders.length - 1].id, udhaar: true });
+  C.runAction(s, 'owner', { text: 'ok' });
+  const t = s.txns[s.txns.length - 1];
+  assert.strictEqual(t.custId, r.id); assert.strictEqual(t.dueDate, '2026-11-01');
+  // late: the voucher is told once, and nothing is ever written to the voucher's khata
+  const vBal = C.balance(s, v.id);
+  const told = [];
+  while (s.today < '2026-11-20') { const k = s.messages.length; C.runAction(s, 'nextDay', {}); told.push(...s.messages.slice(k).filter((m) => m.kind === 'vouch-late')); }
+  assert.strictEqual(told.length, 1);
+  assert.strictEqual(told[0].to, v.id);
+  assert.match(told[0].text, /Aap par koi udhaar nahi hai/);
+  assert.strictEqual(C.balance(s, v.id), vBal);
+});
+test('naye log: each on-time repayment raises the limit one step; a guest cannot vouch', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const v = s.customers.find((c) => c.name === 'Verma ji');
+  C.runAction(s, 'customer', { custId: v.id, text: 'Rahul 9876512345 mera dost hai, main jaanta hoon' });
+  C.runAction(s, 'owner', { text: 'ok' });
+  const r = s.customers.find((c) => c.phone === '9876512345');
+  C.runAction(s, 'owner', { text: 'Rahul ne 200 ka saaman liya, kal denge' });
+  C.runAction(s, 'nextDay', {});
+  C.runAction(s, 'owner', { text: 'Rahul ne 200 jama kiye' });
+  assert.strictEqual(C.udhaarLimit(s, r), 500);
+  assert.match(C.runAction(s, 'owner', { text: 'Rahul ne 600 ka saaman liya' }).result.messages[0].text, /Seema ₹500 .* seema se upar/);
+  const g = C.customerFromWhatsapp(s, '9811111111', 'Neha').cust;
+  C.runAction(s, 'customer', { custId: g.id, text: 'Amit 9822233344 mera dost hai, main jaanta hoon' });
+  assert.ok(!s.customers.some((c) => c.phone === '9822233344'));
+});

@@ -3490,7 +3490,7 @@ var qrcode = function() {
     switch (intent.intent) {
       case 'credit': {
         // a new entry keeps an existing future promise, but never inherits a date that has already passed
-        const due = intent.dueDate || (cust.dueDate && cust.dueDate > state.today && balance(state, cust.id) > 0 ? cust.dueDate : addDays(state.today, state.shop.defaultDays));
+        const due = intent.dueDate || (cust.dueDate && cust.dueDate > state.today && balance(state, cust.id) > 0 ? cust.dueDate : nextPayday(state, cust) || addDays(state.today, state.shop.defaultDays));
         if (cust.guest) { delete cust.guest; log(state, 'customer', 'Owner opened khata for ' + cust.name + ' by writing udhaar'); }
         const tx = { id: nextId(state, 'T'), custId: cust.id, type: 'credit', amount: intent.amount, items: intent.items || '', date: state.today, dueDate: due, note: intent.raw || '', source: intent.source || 'text', parser: intent.parser || 'rules' };
         if (intent.lines) tx.lines = intent.lines.map((l) => ({ name: l.name, qty: l.qty, unit: l.unit, price: l.price, from: l.from }));
@@ -3509,6 +3509,7 @@ var qrcode = function() {
             (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko WhatsApp par bhej rahe hain, woh "Haan / Galat" se check karenge.' : '')
             : (intent.items ? ' (' + intent.items + ')' : '') + '.') + '\nKul baaki: ' + rupees(balance(state, cust.id)) + '\n📅 ' +
           (intent.dueDate ? 'Wada: ' + fmtDay(due) + '. Usi din yaad dila dunga.' : fmtDay(due) + ' ko yaad dila dunga (koi tareekh nahi boli thi).');
+        text += limitNote(state, cust);
         if (said != null && Math.round(said - heardSum)) text += '\n⚠️ Items ka jod ' + rupees(heardSum) + ', bola gaya total ' + rupees(said) + '. ' + rupees(said) + ' likha. Galat ho toh "galti" boliye.';
         else if (said != null) text += '\n👍 Items ka jod bole gaye total ' + rupees(said) + ' se milta hai.';
         if (!cust.phone) text += '\n📱 ' + cust.name + ' ka WhatsApp number bhej dijiye, reminder ke liye. Jaise: "' + cust.name + ' ka number 98xxxxxxxx"';
@@ -3691,6 +3692,12 @@ var qrcode = function() {
     const text = reminderText(state, c, level);
     emit(state, out, c.id, text, { kind: 'reminder', level, upi: upiLink(state, c, bal), amount: bal });
     c.lastReminder = state.today; c.reminderLevel = Math.max(c.reminderLevel || 0, level);
+    const vb = c.vouch && getCust(state, c.vouch.by);
+    if (vb && level >= 2 && c.vouch.toldFor !== c.dueDate) {
+      c.vouch.toldFor = c.dueDate;
+      emit(state, out, vb.id, '🙏 ' + vb.name + ', ' + c.name + ' (jinki aapne pehchan di thi) ka ' + rupees(bal) + ' ' + daysBetween(c.dueDate, state.today) + ' din se baaki hai. Aap par koi udhaar nahi hai; bas bata rahe hain, ho sake toh unhe yaad dila dijiye.', { kind: 'vouch-late' });
+      log(state, 'vouch', 'Told ' + vb.name + ' that ' + c.name + ' is late');
+    }
     log(state, 'reminder', 'L' + level + ' reminder to ' + c.name + ' for ' + rupees(bal) + ' (' + why + ')');
   }
 
@@ -3844,6 +3851,50 @@ var qrcode = function() {
     return out;
   }
 
+  // ------------------------------------------------------------ naye log: udhaar for a newcomer someone vouches for
+  // Shops give udhaar only to people they know. A newcomer (a student or a new job in a new city) is known to nobody,
+  // so a khata customer vouches: "Rahul 98xxxxxxxx mera roommate hai, main jaanta hoon". The owner says one "ok" and the
+  // newcomer gets a small limit that grows with every on-time repayment. The voucher is told if the newcomer is late,
+  // once; the debt never moves onto the voucher.
+  const VOUCH = { start: 300, step: 200, cap: 1500 };
+  const VOUCH_CUE = /\s(jaanta|janta|jaanti|janti|jaante|jante|pehchan|pahchan|pehchanta|guarantee|garanti|bharosa|bharose|roommate|rumet|dost|friend|padosi|rishtedar|cousin|colleague|sath kaam|saath kaam)\s/;
+  function parseVouch(state, text) {
+    const m = /(?:\+?91[\s-]?)?([6-9]\d{9})\b/.exec(String(text));
+    if (!m || !VOUCH_CUE.test(' ' + tokenize(text).text + ' ' + String(text).toLowerCase() + ' ')) return null;
+    const before = String(text).slice(0, m.index);
+    const tok = tokenize(before.replace(/[^\p{L}\s]/gu, ' '));
+    const words = tok.norm.map((w, i) => ({ n: w, d: tok.display[i] })).filter((w) => /^[a-z]{2,}$/.test(w.n) && !HONORIFICS.has(w.n) && !STOP.has(w.n)).slice(-2);
+    const name = words.length ? prettyName(words.map((w) => w.d)) : 'Grahak ' + m[1].slice(-4);
+    return { phone: m[1], name, key: words.length ? nameKey(words.map((w) => w.n)) : 'grahak ' + m[1].slice(-4) };
+  }
+  function handleVouch(state, voucher, v, out) {
+    let c = state.customers.find((x) => x.phone === v.phone);
+    if (c && !c.guest) { emit(state, out, voucher.id, c.name + ' pehle se ' + state.shop.name + ' ke khate mein hain 🙏'); return out; }
+    if (!c) c = addCustomer(state, state.customers.some((x) => x.key === v.key) ? v.name + ' ' + v.phone.slice(-4) : v.name, v.key, { phone: v.phone, guest: true });
+    c.vouch = { by: voucher.id, date: state.today };
+    log(state, 'vouch', voucher.name + ' vouched for ' + c.name);
+    emit(state, out, voucher.id, 'Dhanyavaad ' + voucher.name + ' 🙏 Dukaandaar se poochkar ' + c.name + ' ka khata kholenge, chhoti seema (' + rupees(VOUCH.start) + ') se.\nAap par koi udhaar nahi aayega. Bas ' + c.name + ' late hue toh aapko ek baar bata denge.');
+    state.ownerAsks = ownerAsks(state).filter((a) => !(a.type === 'guest' && a.custId === c.id));
+    askOwner(state, out, { type: 'vouch', custId: c.id });
+    return out;
+  }
+  /** A vouched customer's udhaar limit: the start, one step up for every udhaar repaid on time since, up to the cap. */
+  function udhaarLimit(state, c) {
+    if (c.limit == null) return null;
+    const since = c.limitSince || '0000';
+    const onTime = creditHistory(state, c.id).filter((h) => h.t.date >= since && h.cleared && daysBetween(h.t.dueDate || addDays(h.t.date, 7), h.cleared) <= 1).length;
+    return Math.min(c.limitCap || VOUCH.cap, c.limit + onTime * VOUCH.step);
+  }
+  /** The next salary / stipend day the customer gave ("1 tareekh"), as a date after today. */
+  function nextPayday(state, c) {
+    if (!c.payday) return null;
+    const [y, mo] = state.today.split('-').map(Number), pad = (n) => String(n).padStart(2, '0');
+    const at = (yy, mm) => { const last = new Date(Date.UTC(yy, mm, 0)).getUTCDate(); return yy + '-' + pad(mm) + '-' + pad(Math.min(c.payday, last)); };
+    const d = at(y, mo);
+    return d > state.today ? d : (mo === 12 ? at(y + 1, 1) : at(y, mo + 1));
+  }
+  const limitNote = (state, c) => { const l = udhaarLimit(state, c); return l == null ? '' : '\n🤝 Seema ' + rupees(l) + ' (abhi baaki ' + rupees(Math.max(0, balance(state, c.id))) + ')' + (balance(state, c.id) > l ? ' ⚠️ seema se upar' : ''); };
+
   // ------------------------------------------------------------ customer orders (the Blinkit answer)
   // A customer sends the list ("aata 5 kilo, tel 1 litre"); the agent prices it from the shop's own rate memory and
   // asks "udhaar mein likhein?". The owner says one "ok" and it becomes a khata entry. Only people already in the khata
@@ -3871,14 +3922,16 @@ var qrcode = function() {
   const ownerAsks = (state) => (state.ownerAsks = state.ownerAsks || []);
   /** Drop questions that no longer need an answer: a number whose khata the owner opened by writing udhaar, an order already settled. */
   function pruneAsks(state) {
-    state.ownerAsks = ownerAsks(state).filter((a) => a.type === 'guest' ? (getCust(state, a.custId) || {}).guest : (orders(state).find((o) => o.id === a.orderId) || {}).status === 'owner');
+    state.ownerAsks = ownerAsks(state).filter((a) => a.type === 'guest' || a.type === 'vouch' ? (getCust(state, a.custId) || {}).guest : (orders(state).find((o) => o.id === a.orderId) || {}).status === 'owner');
   }
   function askOwner(state, out, ask) {
+    if (ask.custId && ownerAsks(state).some((a) => a.custId === ask.custId)) return;
     ownerAsks(state).push(ask);
     if (ownerAsks(state).length === 1) emit(state, out, 'owner', askText(state, ask), { kind: 'owner-ask' });
   }
   function askText(state, a) {
     const more = ownerAsks(state).length > 1 ? '\n(' + (ownerAsks(state).length - 1) + ' aur baaki)' : '';
+    if (a.type === 'vouch') { const c = getCust(state, a.custId), v = getCust(state, c.vouch.by); return '🤝 ' + v.name + ' (aapke grahak, ' + customerScore(state, v.id).label + ') kehte hain woh ' + c.name + ' (+91 ' + c.phone + ') ko jaante hain.\nInka khata ' + rupees(VOUCH.start) + ' ki seema se kholein? Har time par chukane par seema ' + rupees(VOUCH.step) + ' badhegi, ' + rupees(VOUCH.cap) + ' tak.\nJawab: *ok* ya *nahi*' + more; }
     if (a.type === 'guest') { const c = getCust(state, a.custId); return '📱 Naya number jud gaya: ' + c.name + ' (+91 ' + c.phone + '). Inka khata kholein, taaki udhaar le sakein?\nJawab: *ok* ya *nahi*' + more; }
     const o = orders(state).find((x) => x.id === a.orderId), c = getCust(state, o.custId);
     return '🛒 Naya order: ' + c.name + ', ' + (o.mode === 'udhaar' ? 'udhaar par' : 'cash par') + '\n' + orderText(o) + '\nPakka karein? *ok* ya *nahi*' + more;
@@ -3887,7 +3940,16 @@ var qrcode = function() {
     const out = [];
     const a = ownerAsks(state).shift();
     if (!a) return out;
-    if (a.type === 'guest') {
+    if (a.type === 'vouch') {
+      const c = getCust(state, a.custId), v = getCust(state, c.vouch.by);
+      if (yes) {
+        delete c.guest; c.limit = VOUCH.start; c.limitSince = state.today;
+        log(state, 'customer', 'Owner opened khata for ' + c.name + ' (vouched by ' + v.name + ', limit ' + rupees(VOUCH.start) + ')');
+        emit(state, out, 'owner', '✅ ' + c.name + ' ka khata khul gaya, seema ' + rupees(VOUCH.start) + '. ' + v.name + ' ki pehchan se.');
+        emit(state, out, c.id, 'Namaste ' + c.name + ' 🙏 ' + v.name + ' ki pehchan se ' + state.shop.name + ' ne aapka khata khola hai. Udhaar seema: ' + rupees(VOUCH.start) + ', har baar time par chukane par badhegi.\nSalary ya stipend kis tareekh ko aati hai? Jaise "1 tareekh ko salary aati hai". Usi din ka wada likhenge.');
+        emit(state, out, v.id, '✅ ' + c.name + ' ka khata khul gaya. Dhanyavaad 🙏');
+      } else { c.vouch.declined = state.today; emit(state, out, 'owner', 'Theek hai. ' + c.name + ' sirf cash par order kar sakte hain.'); }
+    } else if (a.type === 'guest') {
       const c = getCust(state, a.custId);
       if (yes) { delete c.guest; log(state, 'customer', 'Owner opened khata for ' + c.name); emit(state, out, 'owner', '✅ ' + c.name + ' ka khata khul gaya. Ab inke order udhaar par bhi aa sakte hain.'); emit(state, out, c.id, '✅ ' + state.shop.name + ' ne aapka khata khol diya. Ab order udhaar par bhi de sakte hain.'); }
       else emit(state, out, 'owner', 'Theek hai. ' + c.name + ' sirf cash par order kar sakte hain.');
@@ -3896,13 +3958,13 @@ var qrcode = function() {
       if (!yes) { o.status = 'rejected'; emit(state, out, 'owner', '❌ ' + c.name + ' ka order mana kar diya.'); emit(state, out, c.id, '🙏 Maaf kijiye, abhi yeh order nahi ho payega. - ' + state.shop.name); }
       else if (o.mode === 'udhaar' && !c.guest) {
         o.status = 'done';
-        const due = addDays(state.today, state.shop.defaultDays);
+        const due = nextPayday(state, c) || addDays(state.today, state.shop.defaultDays);
         const tx = { id: nextId(state, 'T'), custId: c.id, type: 'credit', amount: o.amount, items: o.lines.map((l) => l.name + (qtyText(l) ? ' ' + qtyText(l) : '')).join(', '), date: state.today, dueDate: due, note: 'WhatsApp order', source: 'order', parser: 'rules',
           lines: o.lines.filter((l) => l.price != null).map((l) => ({ name: l.name, qty: l.qty, unit: l.unit, price: l.price, from: l.from })) };
         state.txns.push(tx); o.txnId = tx.id; state.lastAction = { txnId: tx.id };
         if (!c.dueDate || c.dueDate <= state.today) { c.dueDate = due; c.reminderLevel = 0; c.lastReminder = null; }
         log(state, 'order', c.name + ' order ' + rupees(o.amount) + ' on udhaar');
-        emit(state, out, 'owner', '✅ Order pakka: ' + c.name + ', ' + rupees(o.amount) + ' khate mein likh diya. Kul baaki: ' + rupees(balance(state, c.id)) + '.\nSaaman bhijwa dijiye.');
+        emit(state, out, 'owner', '✅ Order pakka: ' + c.name + ', ' + rupees(o.amount) + ' khate mein likh diya. Kul baaki: ' + rupees(balance(state, c.id)) + '.\nSaaman bhijwa dijiye.' + limitNote(state, c));
         emit(state, out, c.id, '✅ Order pakka! Saaman aa raha hai. - ' + state.shop.name); // the item-wise bill with Haan / Galat follows, as for every entry
       } else {
         o.status = 'done';
@@ -3919,6 +3981,13 @@ var qrcode = function() {
     const o = { id: nextId(state, 'O'), custId: c.id, lines, amount, date: state.today, status: c.guest ? 'owner' : 'ask', mode: c.guest ? 'cash' : null };
     orders(state).push(o);
     log(state, 'order', c.name + ' ordered ' + rupees(amount));
+    const lim = udhaarLimit(state, c);
+    if (!c.guest && lim != null && Math.max(0, balance(state, c.id)) + amount > lim) {
+      o.status = 'owner'; o.mode = 'cash';
+      emit(state, out, c.id, '🛒 Order mila:\n' + orderText(o) + '\nAapki udhaar seema ' + rupees(lim) + ' hai (abhi baaki ' + rupees(Math.max(0, balance(state, c.id))) + '), isliye yeh order cash par. Time par chukane se seema badhti hai. 🙏');
+      askOwner(state, out, { type: 'order', orderId: o.id });
+      return out;
+    }
     if (c.guest) {
       emit(state, out, c.id, '🛒 Order mila:\n' + orderText(o) + '\nCash par ready karenge. Dukaandaar pakka karte hi yahin bata denge. 🙏');
       askOwner(state, out, { type: 'order', orderId: o.id });
@@ -3951,6 +4020,18 @@ var qrcode = function() {
         .map((t) => '  ' + fmtDate(t.date) + ': ' + rupees(t.amount) + ' ' + typeHi(t) + (t.lines ? '\n' + billText(t.lines) : t.items ? ' (' + t.items + ')' : '')).join('\n');
       emit(state, out, c.id, '📄 ' + state.shop.name + '\nAapke naam: ' + rupees(Math.round(bal)) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: Math.round(bal) });
       return out;
+    }
+    const v = !c.guest ? parseVouch(state, text) : null;
+    if (v && v.phone !== c.phone) return handleVouch(state, c, v, out);
+    if (c.limit != null && /\s(salary|selary|salari|stipend|tankha|tanakha|tankhah|pagar|payment ati|paisa ata|paise ate)\s/.test(' ' + tok.text + ' ' + String(text).toLowerCase() + ' ')) {
+      const dm = /\b([12]?\d|3[01])\b/.exec(text);
+      if (dm && +dm[1] >= 1) {
+        c.payday = +dm[1];
+        emit(state, out, c.id, '📅 Theek hai, har mahine ' + c.payday + ' tareekh. Agla wada: ' + fmtDay(nextPayday(state, c)) + '.');
+        if (balance(state, c.id) > 0) { c.dueDate = nextPayday(state, c); c.reminderLevel = 0; }
+        emit(state, out, 'owner', '💬 ' + c.name + ' ki salary ' + c.payday + ' tareekh ko aati hai. Unke wade usi din ke likhunga.');
+        return out;
+      }
     }
     const ol = !due ? orderLines(state, text) : [];
     if (ol.length && ol.some((l) => l.from === 'memory')) return placeOrder(state, c, ol, out);
@@ -4774,7 +4855,7 @@ var qrcode = function() {
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier, orderLines,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier, orderLines, parseVouch, udhaarLimit, nextPayday,
     // real WhatsApp channel
     looksLikeCounter, counterIntent,
     customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),
