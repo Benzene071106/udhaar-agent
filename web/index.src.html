@@ -240,7 +240,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
 .dash h2 { font: 1.45rem/1.1 var(--f-display); margin: 0; }
 .dash .dhead span { color: var(--muted); font-size: .88rem; }
 .dash h3 { font-size: .74rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
-.kpitoday { grid-column: 1 / -1; font-size: 14px; color: var(--muted, #5b564b); }
+.kpitoday { grid-column: 1 / -1; white-space: pre-line; font-size: 14px; color: var(--muted, #5b564b); }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px 18px 4px; }
 @media (max-width: 900px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .kpi { border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -772,6 +772,8 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     $('kRateSub').textContent = d.collectionRate == null ? 'pichhle 30 din mein koi wada nahi' : C.rupees(d.dueInWindow) + ' ka wada tha · ' + Math.round(d.onTimeRate * 100) + '% time par';
     const td = d.today;
     $('kToday').textContent = 'Aaj: ' + C.rupees(td.newCredit) + ' naya udhaar (' + td.newCreditCount + ') · ' + C.rupees(td.back) + ' wapas (cash ' + C.rupees(td.backCash) + ', UPI ' + C.rupees(td.backUpi) + ')' + (td.disputes ? ' · ❗ ' + td.disputes + ' grahak ne galat bataya' : '');
+    const wk = d.week;
+    if (wk && wk.owed) $('kToday').textContent += '\n📦 Is hafte supplier ko ' + C.rupees(wk.owed) + ' dena · grahakon se ummeed ' + C.rupees(wk.incoming) + (wk.shortfall ? ' · ⚠️ kam padega ' + C.rupees(wk.shortfall) : ' · ✅ pura') + (wk.remindFirst.length ? ' · pehle yaad dilao: ' + wk.remindFirst.map((x) => x.name).join(', ') : '');
     $('kCash').textContent = C.rupees(d.pendingCash); $('kCashSub').textContent = d.pendingCount ? d.pendingCount + ' claim · Dukaan band par ✅/❌' : 'sab confirm';
     $('odList').innerHTML = d.overdue.length ? d.overdue.map((o) => '<li data-c="' + o.id + '" tabindex="0"><span class="ini">' + esc(initial(o.name)) + '</span><span class="nm">' + esc(o.name) + '</span>' +
       '<span class="amt">' + esc(C.rupees(o.amount)) + '</span><span class="st"><span class="late">' + o.daysLate + ' din late</span>' +

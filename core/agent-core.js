@@ -114,7 +114,7 @@
     remind: /\s(yad|remind|reminder|tagada|takaja|message bhej|msg bhej|bol do|yad dila)\s/,
     all: /\s(sab|sabka|sabko|sabhi|total|kul|kon kon|kaun kaun|list|summary|report|aj ka hisab|pura hisab|sare)\s/,
     query: /\s(kitna|kitne|hisab|baki|balance|bakaya|dikha|dikhao|batao|owes|how much)\s/,
-    strongPay: /\s(cash|nakad|nakd|nagad|naqad|jama|chuka|chukaya|chukta|vapas|lauta|lautaya|lotaya|payment|paid|clear|received|mil gaya|mil gaye|mil gai|mil gae|bhej diya|bhej diye|bhej die|gave|pay kiya|pay kar diya|pay kar die)\s/,
+    strongPay: /\s(cash|nakad|nakd|nagad|naqad|jama|chuka|chukaya|chukta|vapas|lauta|lautaya|lotaya|payment|paid|clear|received|mil gaya|mil gaye|mil gai|mil gae|mile|mila|mili|bhej diya|bhej diye|bhej die|gave|pay kiya|pay kar diya|pay kar die)\s/,
     credit: /\s(liya|liye|lie|le gaya|le gaye|le gai|le gae|le gayi|le liya|saman|samaan|sauda|udhar|udhari|khate me|khate mein|khata me|likh|likho|likh do|likhdo|credit|bought|took|uthaya|le ke gaya|lekar gaya|leke gaya)\s/,
     weakPay: /\s(de diya|de diye|de die|de dia|de gaya|de gaye|de gae|de gai|de gayi|diye|diya|die|dia)\s/
   };
@@ -778,9 +778,97 @@
   }
 
   /** Full pipeline for an owner message: rule parse (or a supplied intent), record, apply. */
+  // ------------------------------------------------------------ the shop's own udhaar (wholesaler / distributor)
+  // The owner buys maal on credit too. "Agrawal traders se 8000 ka maal udhaar, 18 tareekh tak" records it;
+  // "Agrawal traders ko 8000 de diye" pays it. The weekly view sets it against what customers are likely to pay.
+  const supplies = (state) => (state.supplies = state.supplies || []);
+  const SUPPLIER_WORD = /\s(traders?|agenc(y|ies)|agensi|distributors?|wholesal(e|er)|supplier|suppliers|enterprises?|stores|mandi|godown|company|brothers|bros|dairy|marketing|sales)\s/;
+  // the spelling-normalised words and the words as typed, so "maal", "mal", "supplier" and "suplier" all match
+  const both = (text, tok) => (tok || tokenize(text)).text + ' ' + String(text).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ') + ' ';
+  const supOwed = (k) => Math.max(0, Math.round(k.amount - (k.paid || 0)));
+  const supKey = (words) => words.filter((w) => !HONORIFICS.has(w)).join(' ');
+  function findSupplier(state, key) {
+    if (!key) return null;
+    return supplies(state).filter((k) => supOwed(k) > 0).find((k) => k.key === key || k.key.startsWith(key + ' ') || key.startsWith(k.key + ' ')) || null;
+  }
+  /** A supplier message as { kind: 'new'|'paid', ... }, or null when the message is about customers. */
+  function parseSupplier(state, text) {
+    const tok = tokenize(text), t = both(text, tok), n = tok.norm;
+    const se = n.indexOf('se'), ko = n.indexOf('ko');
+    const { due, skip } = extractDue(tok, state.today);
+    const amt = extractAmount(tok, skip || new Set());
+    const amount = amt && amt.amount > 0 ? amt.amount : null;
+    const nameAt = (i) => {
+      const words = []; for (let j = 0; j < i; j++) { if (/^\d/.test(n[j])) break; words.push(j); }
+      return { key: supKey(words.map((j) => n[j])), name: words.filter((j) => !HONORIFICS.has(n[j])).map((j) => cap(tok.display[j].toLowerCase())).join(' ') };
+    };
+    if (ko > 0 && amount && /\s(de diye|de diya|diye|diya|chuka|chukaya|chuka diya|chuka diye|bhej diye|bhej diya|payment|paid)\s/.test(t)) {
+      const who = nameAt(ko), k = findSupplier(state, who.key);
+      if (k) return { kind: 'paid', sup: k, amount };
+    }
+    if (se > 0 && amount && (SUPPLIER_WORD.test(both(tok.display.slice(0, se).join(' '))) || /\s(maal|mal)\s/.test(t)) && /\s(maal|mal|udhaar|udhar|liya|liye|aaya|aya|uthaya|mangaya)\s/.test(t)) {
+      const who = nameAt(se);
+      if (who.key) return { kind: 'new', key: who.key, name: who.name, amount, dueDate: due || addDays(state.today, 7) };
+    }
+    return null;
+  }
+  function applySupplier(state, sp, reply) {
+    if (sp.kind === 'new') {
+      const k = { id: nextId(state, 'S'), key: sp.key, name: sp.name, amount: sp.amount, paid: 0, date: state.today, dueDate: sp.dueDate };
+      supplies(state).push(k);
+      log(state, 'supplier', k.name + ' +' + rupees(k.amount) + ' (due ' + fmtDate(k.dueDate) + ')');
+      reply('📦 Likh liya: ' + k.name + ' ka ' + rupees(k.amount) + ' maal udhaar, ' + fmtDay(k.dueDate) + ' tak dena hai.\n' + weekLine(state) + '\nPura hafta dekhne ke liye: "is hafte ka hisaab"');
+    } else {
+      const k = sp.sup;
+      k.paid = Math.min(k.amount, (k.paid || 0) + sp.amount);
+      log(state, 'supplier', k.name + ' paid ' + rupees(sp.amount));
+      reply('✅ ' + k.name + ' ko ' + rupees(sp.amount) + ' diye. ' + (supOwed(k) ? 'Ab bhi dena hai: ' + rupees(supOwed(k)) + '.' : 'Inka hisaab clear.') + '\n' + weekLine(state));
+    }
+  }
+  /**
+   * The week ahead: what the shop owes suppliers by then, what customers are likely to pay by then (their baaki
+   * times how reliably they have paid on time before; half that once they are already late), and the gap.
+   */
+  function weekStats(state) {
+    const T = state.today, end = addDays(T, 6);
+    const owe = supplies(state).filter((k) => supOwed(k) > 0 && k.dueDate <= end).sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1))
+      .map((k) => ({ id: k.id, name: k.name, amount: supOwed(k), dueDate: k.dueDate }));
+    const exp = state.customers.map((c) => {
+      const b = balance(state, c.id);
+      if (b <= 0 || !c.dueDate || c.dueDate > end) return null;
+      const r = customerScore(state, c.id).onTimeRate;
+      const p = (r == null ? 0.5 : r) * (c.dueDate < T ? 0.5 : 1);
+      return { id: c.id, name: c.name, balance: Math.round(b), expected: Math.round(b * p), late: c.dueDate < T };
+    }).filter(Boolean).sort((a, b) => b.expected - a.expected || b.balance - a.balance);
+    const owed = owe.reduce((s, k) => s + k.amount, 0), dueIn = exp.reduce((s, x) => s + x.balance, 0), incoming = exp.reduce((s, x) => s + x.expected, 0);
+    return { from: T, to: end, owe, owed, dueIn, incoming, shortfall: Math.max(0, owed - incoming), remindFirst: exp.slice(0, 3).map((x) => ({ id: x.id, name: x.name, balance: x.balance })) };
+  }
+  function weekLine(state) {
+    const w = weekStats(state);
+    if (!w.owed) return '📦 Is hafte supplier ko kuch dena nahi hai.';
+    return '📦 Is hafte dena: ' + rupees(w.owed) + ' · grahakon se ummeed: ' + rupees(w.incoming) + (w.shortfall ? ' · ⚠️ kam padega: ' + rupees(w.shortfall) : ' · ✅ pura ho jayega');
+  }
+  function weekText(state) {
+    const w = weekStats(state);
+    const lines = ['📦 Is hafte ka hisaab (' + fmtDate(w.from) + ' se ' + fmtDate(w.to) + ')'];
+    lines.push(w.owe.length ? 'Supplier ko dena: ' + rupees(w.owed) + '\n' + w.owe.map((k) => '  • ' + k.name + ' ' + rupees(k.amount) + ', ' + fmtDay(k.dueDate)).join('\n')
+      : 'Supplier ko dena: ₹0. Likhne ke liye: "Agrawal traders se 8000 ka maal udhaar, 20 tareekh tak"');
+    lines.push('Grahakon se aana hai: ' + rupees(w.dueIn) + ' (is hafte ke wade)');
+    lines.push('Aane ki ummeed: ' + rupees(w.incoming) + ' (har grahak ke purane time-par record se)');
+    if (w.owed) lines.push(w.shortfall ? '⚠️ Kam padega: ' + rupees(w.shortfall) : '✅ Paisa pura ho jayega');
+    if (w.remindFirst.length) lines.push('Pehle inhe yaad dilaiye: ' + w.remindFirst.map((x) => x.name + ' ' + rupees(x.balance)).join(', ') + '\n("' + w.remindFirst[0].name + ' ko yaad dilao" likhiye)');
+    return lines.join('\n');
+  }
+  const WEEK_ASK = /\s(hafte|hafta|hafte ka|week|weekly|supplier|suppliers|wholesaler|distributor|maal ka udhaar|maal ka udhar)\s/;
+
   function handleOwnerMessage(state, text, opts) {
     opts = opts || {};
     recordOwnerMessage(state, text, opts.source);
+    if (!state.pending) {
+      const sp = parseSupplier(state, text);
+      if (sp) { const out = []; applySupplier(state, sp, (t) => emit(state, out, 'owner', t, { kind: 'supplier' })); return { intent: { intent: 'supplier' }, messages: out }; }
+      if (WEEK_ASK.test(both(text)) && !/\d/.test(text)) { const out = []; emit(state, out, 'owner', weekText(state), { kind: 'week' }); return { intent: { intent: 'week' }, messages: out }; }
+    }
     let intent = opts.intent || parseOwnerMessage(text, state.today);
     if (!state.pending && looksLikeCounter(text)) intent = counterIntent(state, text);
     intent.source = opts.source || 'text';
@@ -869,7 +957,8 @@
       (s.top.length ? 'Sabse zyada: ' + s.top.map((x) => x.name + ' ' + rupees(x.amount)).join(', ') + '\n' : '') +
       '💵 Cash ✅ baaki: ' + s.pendingCash + ' · ❗ Grahak ne galat bataya: ' + s.disputes +
       (overdue.length ? '\n⚠️ Late: ' + overdue.slice(0, 5).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') : '') +
-      (tomorrow.length ? '\n📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') : '');
+      (tomorrow.length ? '\n📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') : '') +
+      (supplies(state).some((k) => supOwed(k) > 0) ? '\n' + weekLine(state) : '');
   }
   /** Closing time: one summary, then one batch of cash claims for the owner to tick ✅ or ❌. */
   function runEveningSummary(state) {
@@ -1253,6 +1342,7 @@
       shop: { id: 'gupta', name: 'Gupta Kirana Store', owner: 'Rakesh Gupta', upiId: 'guptakirana@upi', city: 'Guwahati' },
       seed: 7,
       // rates the agent already learned from earlier entries: name, rate, unit
+      supplies: [['Agrawal Traders', 14000, 3], ['Hindustan Agency', 3500, 10]], // the shop's own maal udhaar: name, rupees, due in days
       prices: [['cheeni', 45, 'kg'], ['atta', 42, 'kg'], ['chawal', 60, 'kg'], ['tel', 180, 'l'], ['doodh', 30, 'pkt'], ['maggi', 14, ''], ['biscuit', 10, '']],
       people: [
         // name, key, phone, reliability, known UPI IDs
@@ -1350,6 +1440,7 @@
       c.dueDate = addDays(T, dueIn);
       if (dueIn < 0) { c.lastReminder = addDays(T, dueIn); c.reminderLevel = 1; }
     }
+    for (const [name, amount, dueIn] of cfg.supplies || []) supplies(state).push({ id: nextId(state, 'S'), key: tokenize(name).norm.join(' '), name, amount, paid: 0, date: addDays(T, -10), dueDate: addDays(T, dueIn) });
     for (const [name, rate, unit] of cfg.prices || []) prices(state)[tokenize(name).norm.join(' ')] = { name, rate, unit, date: addDays(T, -3) };
     log(state, 'seed', 'Loaded 75 days of sample khata for ' + state.customers.length + ' customers of ' + state.shop.name);
     return state;
@@ -1386,7 +1477,7 @@
       overdueAmount: Math.round(overdue.reduce((s, x) => s + x.amount, 0)), overdue,
       collectionRate: dueTotal ? paidTotal / dueTotal : null, onTimeRate: dueTotal ? onTime / dueTotal : null, dueInWindow: Math.round(dueTotal),
       avgDaysToRecover: prof.avgDaysToRecover, pendingCash: pendingClaims.reduce((s, k) => s + k.amount, 0), pendingCount: pendingClaims.length,
-      daily, today: (({ owing, payers, ...t }) => t)(todayStats(state))
+      daily, today: (({ owing, payers, ...t }) => t)(todayStats(state)), week: weekStats(state)
     };
   }
 
@@ -1795,7 +1886,7 @@
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier,
     // real WhatsApp channel
     looksLikeCounter, counterIntent,
     customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),

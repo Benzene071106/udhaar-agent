@@ -585,3 +585,32 @@ test('owner "aaj ka hisaab": today\'s udhaar, money back by cash and UPI, total,
   }
   assert.deepStrictEqual(C.dashboard(s).today.top, t.top);
 });
+
+test('supplier udhaar: recorded, paid, and set against what customers will likely pay this week', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const w0 = C.weekStats(s);
+  assert.ok(w0.owed > 0, 'the demo shop owes a wholesaler this week');
+  assert.ok(w0.incoming > 0 && w0.incoming <= w0.dueIn);
+  assert.strictEqual(w0.shortfall, Math.max(0, w0.owed - w0.incoming));
+  assert.ok(w0.remindFirst.length > 0 && w0.remindFirst.length <= 3);
+  const before = s.txns.length;
+  const r = C.runAction(s, 'owner', { text: 'Sharma traders se 5000 ka maal udhaar, ' + (+TODAY.slice(8, 10) + 3) + ' tareekh tak' });
+  assert.strictEqual(s.txns.length, before, 'a supplier is never a customer');
+  assert.ok(!s.customers.some((c) => /traders/i.test(c.name)));
+  assert.match(r.result.messages[0].text, /Sharma Traders ka ₹5,000 maal udhaar/);
+  assert.strictEqual(C.weekStats(s).owed, w0.owed + 5000);
+  const p = C.runAction(s, 'owner', { text: 'Sharma traders ko 2000 de diye' });
+  assert.match(p.result.messages[0].text, /Ab bhi dena hai: ₹3,000/);
+  assert.strictEqual(C.weekStats(s).owed, w0.owed + 3000);
+  for (const q of ['is hafte ka hisaab', 'supplier ka hisaab', 'is week ka hisaab']) {
+    const t = C.runAction(s, 'owner', { text: q }).result.messages[0].text;
+    assert.match(t, /Supplier ko dena: ₹[\d,]+\n[^]*• Sharma Traders ₹3,000/, q);
+    assert.match(t, /Aane ki ummeed: /, q);
+    assert.match(t, /Pehle inhe yaad dilaiye: /, q);
+  }
+  assert.match(C.runAction(s, 'owner', { text: 'aaj ka hisaab' }).result.messages[0].text, /📦 Is hafte dena: /);
+  assert.deepStrictEqual(C.dashboard(s).week.owed, C.weekStats(s).owed);
+  // money received from a customer is never udhaar
+  C.runAction(s, 'owner', { text: 'Pappu se 100 mila' });
+  assert.strictEqual(s.txns[s.txns.length - 1].type, 'payment');
+});
