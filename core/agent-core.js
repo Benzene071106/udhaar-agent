@@ -128,7 +128,7 @@
   };
   const MULT = { sau: 100, hundred: 100, hajar: 1000, thousand: 1000, k: 1000 };
 
-  const UNITS = /^(kilo|kg|kilogram|gram|gm|g|ltr|litre|liter|lit|l|ml|packet|paket|pkt|dozen|darjan|darjen|piece|pis|pcs|pc|bori|bag|bottle|botal|katta|pav|pau|ader|adha|dibba|dabba|box|tray|kartan|carton)$/;
+  const UNITS = /^(kilo|kg|kilogram|gram|gm|g|ltr|litre|liter|lit|l|ml|packet|paket|pkt|dozen|darjan|darjen|piece|pis|pcs|pc|bori|bag|bottle|botal|katta|pav|pau|ader|adha|dibba|dabba|box|peti|tray|kartan|carton)$/;
   const MONEY_AFTER = /^(ka|ke|ki|rs|rupe|rupaye|rupaya|rupay|rupees|rupee|inr)$/;
   function extractAmount(tok, skipIdx) {
     const n = tok.norm;
@@ -290,7 +290,7 @@
   // "cheeni 2 kilo 90, tel 180, sabun 40". Each spoken rate is remembered, so next time "cheeni 2 kilo, tel" is enough.
   const UNIT_OF = { kilo: 'kg', kg: 'kg', kilogram: 'kg', gram: 'g', gm: 'g', g: 'g', pav: 'pav', pau: 'pav',
     ltr: 'l', litre: 'l', liter: 'l', lit: 'l', l: 'l', ml: 'ml', paket: 'pkt', pkt: 'pkt', dojen: 'dozen', darjan: 'dozen', darjen: 'dozen',
-    piece: 'pc', pis: 'pc', pcs: 'pc', pc: 'pc', botal: 'bottle', botle: 'bottle', bori: 'bori', bag: 'bag', katta: 'bori', dibba: 'dibba', daba: 'dibba', box: 'box', tray: 'tray', kartan: 'box', karton: 'box' };
+    piece: 'pc', pis: 'pc', pcs: 'pc', pc: 'pc', botal: 'bottle', botle: 'bottle', bori: 'bori', bag: 'bag', katta: 'bori', dibba: 'dibba', daba: 'dibba', box: 'box', peti: 'peti', tray: 'tray', kartan: 'box', karton: 'box' };
   // every unit is stored against a base, so a rate learned per kilo also prices "500 gram"
   const UNIT_BASE = { kg: ['kg', 1], g: ['kg', 0.001], pav: ['kg', 0.25], l: ['l', 1], ml: ['l', 0.001] };
   const UNIT_SAY = { kg: 'kilo', g: 'gram', pav: 'pav', l: 'litre', ml: 'ml', pkt: 'packet', dozen: 'dozen', pc: 'piece', bottle: 'bottle' };
@@ -789,42 +789,106 @@
   const both = (text, tok) => (tok || tokenize(text)).text + ' ' + String(text).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ') + ' ';
   const supOwed = (k) => Math.max(0, Math.round(k.amount - (k.paid || 0)));
   const supKey = (words) => words.filter((w) => !HONORIFICS.has(w)).join(' ');
-  function findSupplier(state, key) {
+  const sameSup = (a, b) => a === b || a.startsWith(b + ' ') || b.startsWith(a + ' ');
+  /** The supplier this name means ("Agrawal" finds "Agrawal Traders"), from every entry ever written. */
+  function knownSupplier(state, key) {
     if (!key) return null;
-    return supplies(state).filter((k) => supOwed(k) > 0).find((k) => k.key === key || k.key.startsWith(key + ' ') || key.startsWith(k.key + ' ')) || null;
+    const k = supplies(state).slice().reverse().find((x) => sameSup(x.key, key));
+    return k ? { key: k.key, name: k.name } : null;
   }
-  /** A supplier message as { kind: 'new'|'paid', ... }, or null when the message is about customers. */
+  const supEntries = (state, key) => supplies(state).filter((k) => sameSup(k.key, key)).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const supPays = (state) => (state.supplierPays = state.supplierPays || []);
+  const SUP_FILLER = new Set(['mal', 'udhar', 'liya', 'liye', 'aya', 'aaya', 'uthaya', 'mangaya', 'ka', 'ke', 'ki', 'tak', 'tarikh', 'date', 'aur', 'and', 'se', 'par', 'pe', 'saman', 'diya', 'dena', 'hai', 'he'].map(normWord));
+  /** "10 bori aata 4500 aur 5 bori cheeni 2100": the item lines of a supplier entry (after the name). */
+  function supplierLines(text, from) {
+    const tok = tokenize(text);
+    const skip = new Set(); for (let i = 0; i <= from; i++) skip.add(i);
+    tok.norm.forEach((w, i) => { if (SUP_FILLER.has(w) || /^(tarikh|tarik|tarakh)$/.test(tok.norm[i + 1] || '')) skip.add(i); });
+    return parseLines(tok, skip).lines.map((l) => ({ name: l.name.split(' ').filter((w) => !SUP_FILLER.has(normWord(w))).join(' '), qty: l.qty, unit: l.unit, price: l.price }))
+      .filter((l) => l.name && (l.qty != null || l.price != null));
+  }
+  /** A supplier message as { kind: 'new'|'paid'|'ask'|'list', ... }, or null when the message is about customers. */
   function parseSupplier(state, text) {
     const tok = tokenize(text), t = both(text, tok), n = tok.norm;
-    const se = n.indexOf('se'), ko = n.indexOf('ko');
+    if (/\s(kisko kitna|kis kis ko|kisko dena|kise dena|kisko paisa|sab supplier|supplier list|sare supplier|saare supplier|sabhi supplier|suplier list)\s/.test(t)) return { kind: 'list' };
+    const se = n.indexOf('se'), ko = n.indexOf('ko'), ka = n.indexOf('ka');
     const { due, skip } = extractDue(tok, state.today);
     const amt = extractAmount(tok, skip || new Set());
-    const amount = amt && amt.amount > 0 ? amt.amount : null;
+    let amount = amt && amt.amount > 0 ? amt.amount : null;
     const nameAt = (i) => {
       const words = []; for (let j = 0; j < i; j++) { if (/^\d/.test(n[j])) break; words.push(j); }
-      return { key: supKey(words.map((j) => n[j])), name: words.filter((j) => !HONORIFICS.has(n[j])).map((j) => cap(tok.display[j].toLowerCase())).join(' ') };
+      const key = supKey(words.map((j) => n[j])), known = knownSupplier(state, key);
+      return known || { key, name: words.filter((j) => !HONORIFICS.has(n[j])).map((j) => cap(tok.display[j].toLowerCase())).join(' '), fresh: true };
     };
     if (ko > 0 && amount && /\s(de diye|de diya|diye|diya|chuka|chukaya|chuka diya|chuka diye|bhej diye|bhej diya|payment|paid)\s/.test(t)) {
-      const who = nameAt(ko), k = findSupplier(state, who.key);
-      if (k) return { kind: 'paid', sup: k, amount };
+      const who = nameAt(ko);
+      if (!who.fresh && supEntries(state, who.key).some((k) => supOwed(k) > 0)) return { kind: 'paid', key: who.key, name: who.name, amount };
     }
-    if (se > 0 && amount && (SUPPLIER_WORD.test(both(tok.display.slice(0, se).join(' '))) || /\s(maal|mal)\s/.test(t)) && /\s(maal|mal|udhaar|udhar|liya|liye|aaya|aya|uthaya|mangaya)\s/.test(t)) {
+    if (ka > 0 && !/\d/.test(text) && /\s(hisab|hisaab|kitna|baki|dena|khata|list)\s/.test(t)) {
+      const who = nameAt(ka);
+      if (!who.fresh) return { kind: 'ask', key: who.key, name: who.name };
+    }
+    if (se > 0 && amount) {
       const who = nameAt(se);
-      if (who.key) return { kind: 'new', key: who.key, name: who.name, amount, dueDate: due || addDays(state.today, 7) };
+      const isSup = !who.fresh || SUPPLIER_WORD.test(both(tok.display.slice(0, se).join(' '))) || /\s(maal|mal)\s/.test(t);
+      if (who.key && isSup && /\s(maal|mal|udhaar|udhar|liya|liye|aaya|aya|uthaya|mangaya)\s/.test(t)) {
+        const lines = supplierLines(text, se);
+        const priced = lines.filter((l) => l.price != null);
+        if (priced.length >= 2 || (priced.length === 1 && lines.length === 1)) amount = priced.reduce((a, l) => a + l.price, 0);
+        return { kind: 'new', key: who.key, name: who.name, amount, dueDate: due || addDays(state.today, 7), lines };
+      }
     }
     return null;
   }
+  const supLineText = (l) => cap(l.name) + (l.qty != null ? ' ' + l.qty + (l.unit ? ' ' + (UNIT_SAY[l.unit] || l.unit) : '') : '') + (l.price != null ? ' ' + rupees(l.price) : '');
+  /** One supplier's khata: every maal entry, every payment, what is left and when it is due. */
+  function supplierText(state, key) {
+    const es = supEntries(state, key), name = es.length ? es[es.length - 1].name : key;
+    const pays = supPays(state).filter((p) => sameSup(p.key, key));
+    const left = es.reduce((a, k) => a + supOwed(k), 0);
+    const next = es.filter((k) => supOwed(k) > 0).map((k) => k.dueDate).sort()[0];
+    return '📦 ' + name + ' ka khata\n' +
+      'Maal udhaar:\n' + (es.length ? es.map((k) => '  ' + fmtDate(k.date) + ': ' + rupees(k.amount) + (k.lines && k.lines.length ? ' (' + k.lines.map(supLineText).join(', ') + ')' : '') + ', dena ' + fmtDate(k.dueDate)).join('\n') : '  koi nahi') + '\n' +
+      'Diye:\n' + (pays.length ? pays.map((p) => '  ' + fmtDate(p.date) + ': ' + rupees(p.amount)).join('\n') : '  abhi kuch nahi') + '\n' +
+      (left ? 'Baaki dena: ' + rupees(left) + ', agla ' + fmtDay(next) : 'Hisaab clear ✅');
+  }
+  /** Every supplier the shop still owes: total, next due date; soonest first. */
+  function supplierList(state) {
+    const by = new Map();
+    for (const k of supplies(state)) {
+      const g = [...by.keys()].find((x) => sameSup(x, k.key)) || k.key;
+      const e = by.get(g) || { key: g, name: k.name, owed: 0, total: 0, nextDue: null };
+      e.owed += supOwed(k); e.total += k.amount; e.name = k.name;
+      if (supOwed(k) > 0 && (!e.nextDue || k.dueDate < e.nextDue)) e.nextDue = k.dueDate;
+      by.set(g, e);
+    }
+    return [...by.values()].filter((e) => e.owed > 0).sort((a, b) => (a.nextDue < b.nextDue ? -1 : 1));
+  }
+  function supplierListText(state) {
+    const l = supplierList(state);
+    if (!l.length) return '📦 Kisi supplier ka kuch dena baaki nahi. Likhne ke liye: "Agrawal traders se 10 bori aata 4500 udhaar, 20 tareekh tak"';
+    return '📦 Supplier ko dena: ' + rupees(l.reduce((a, e) => a + e.owed, 0)) + '\n' + l.map((e) => '  • ' + e.name + ' ' + rupees(e.owed) + ', ' + fmtDay(e.nextDue) + (e.nextDue < state.today ? ' ⚠️ late' : '')).join('\n') +
+      '\nKisi ek ka poora hisaab: "' + l[0].name + ' ka hisaab"';
+  }
   function applySupplier(state, sp, reply) {
+    if (sp.kind === 'list') return reply(supplierListText(state));
+    if (sp.kind === 'ask') return reply(supplierText(state, sp.key));
     if (sp.kind === 'new') {
       const k = { id: nextId(state, 'S'), key: sp.key, name: sp.name, amount: sp.amount, paid: 0, date: state.today, dueDate: sp.dueDate };
+      if (sp.lines && sp.lines.length) k.lines = sp.lines;
       supplies(state).push(k);
       log(state, 'supplier', k.name + ' +' + rupees(k.amount) + ' (due ' + fmtDate(k.dueDate) + ')');
-      reply('📦 Likh liya: ' + k.name + ' ka ' + rupees(k.amount) + ' maal udhaar, ' + fmtDay(k.dueDate) + ' tak dena hai.\n' + weekLine(state) + '\nPura hafta dekhne ke liye: "is hafte ka hisaab"');
+      const left = supEntries(state, k.key).reduce((a, x) => a + supOwed(x), 0);
+      reply('📦 Likh liya: ' + k.name + ' ka ' + rupees(k.amount) + ' maal udhaar' + (k.lines ? ' (' + k.lines.map(supLineText).join(', ') + ')' : '') + ', ' + fmtDay(k.dueDate) + ' tak dena hai.' +
+        (left > k.amount ? '\n' + k.name + ' ka kul baaki: ' + rupees(left) : '') + '\n' + weekLine(state) + '\nPura hafta dekhne ke liye: "is hafte ka hisaab"');
     } else {
-      const k = sp.sup;
-      k.paid = Math.min(k.amount, (k.paid || 0) + sp.amount);
-      log(state, 'supplier', k.name + ' paid ' + rupees(sp.amount));
-      reply('✅ ' + k.name + ' ko ' + rupees(sp.amount) + ' diye. ' + (supOwed(k) ? 'Ab bhi dena hai: ' + rupees(supOwed(k)) + '.' : 'Inka hisaab clear.') + '\n' + weekLine(state));
+      // a payment clears the oldest maal first
+      let rest = sp.amount;
+      for (const k of supEntries(state, sp.key)) { if (rest <= 0) break; const take = Math.min(rest, supOwed(k)); k.paid = (k.paid || 0) + take; rest -= take; }
+      supPays(state).push({ key: sp.key, name: sp.name, amount: sp.amount, date: state.today });
+      log(state, 'supplier', sp.name + ' paid ' + rupees(sp.amount));
+      const left = supEntries(state, sp.key).reduce((a, x) => a + supOwed(x), 0);
+      reply('✅ ' + sp.name + ' ko ' + rupees(sp.amount) + ' diye. ' + (left ? 'Ab bhi dena hai: ' + rupees(left) + '.' : 'Inka hisaab clear.') + (rest > 0 ? ' (' + rupees(rest) + ' zyada diye, advance)' : '') + '\n' + weekLine(state));
     }
   }
   /**
@@ -1659,7 +1723,7 @@
       overdueAmount: Math.round(overdue.reduce((s, x) => s + x.amount, 0)), overdue,
       collectionRate: dueTotal ? paidTotal / dueTotal : null, onTimeRate: dueTotal ? onTime / dueTotal : null, dueInWindow: Math.round(dueTotal),
       avgDaysToRecover: prof.avgDaysToRecover, pendingCash: pendingClaims.reduce((s, k) => s + k.amount, 0), pendingCount: pendingClaims.length,
-      daily, today: (({ owing, payers, ...t }) => t)(todayStats(state)), week: weekStats(state)
+      daily, today: (({ owing, payers, ...t }) => t)(todayStats(state)), week: weekStats(state), suppliers: supplierList(state)
     };
   }
 
@@ -2073,7 +2137,7 @@
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier, orderLines, parseVouch, udhaarLimit, nextPayday,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats, weekStats, parseSupplier, supplierList, orderLines, parseVouch, udhaarLimit, nextPayday,
     // real WhatsApp channel
     looksLikeCounter, counterIntent,
     customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),
