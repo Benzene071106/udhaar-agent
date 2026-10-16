@@ -436,3 +436,53 @@ test('do-taraf khata: no reply within 24 hours counts as accepted, and the custo
   assert.strictEqual(m1.answer, 'wrong'); assert.ok(!t1.custOk && t1.custWrong);
   assert.strictEqual(C.openChecks(s, m1.to), 1);
 });
+
+// ---------------------------------------------- bill lines: items with rates, no scanner
+test('spoken bill becomes priced lines, the customer gets the list, and rates are remembered', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const r = C.runAction(s, 'owner', { text: 'Sharma ji cheeni 2 kilo 90, tel 1 litre 180, sabun 40, kal denge', source: 'voice' });
+  const t = s.txns[s.txns.length - 1];
+  assert.strictEqual(t.amount, 310);
+  assert.deepStrictEqual(t.lines.map((l) => [l.name, l.qty, l.unit, l.price, l.from]),
+    [['cheeni', 2, 'kg', 90, 'spoken'], ['tel', 1, 'l', 180, 'spoken'], ['sabun', null, null, 40, 'spoken']]);
+  const toCust = r.result.messages.find((m) => m.kind === 'entry-check');
+  assert.match(toCust.text, /Cheeni 2 kilo = ₹90\n.*Tel 1 litre = ₹180\n.*Sabun = ₹40\n.*Jod: ₹310/);
+  assert.strictEqual(s.prices.sabun.rate, 40);
+  // next time the rates fill themselves: counts, grams and half litres too
+  C.runAction(s, 'owner', { text: 'Pappu ne 500 gram cheeni, sabun 2 aur adha litre tel liya', source: 'voice' });
+  const u = s.txns[s.txns.length - 1];
+  assert.deepStrictEqual(u.lines.map((l) => [l.name, l.price, l.from]), [['cheeni', 23, 'memory'], ['sabun', 80, 'memory'], ['tel', 90, 'memory']]);
+  assert.strictEqual(u.amount, 193);
+});
+test('a stated total wins and the gap is shown as its own line', () => {
+  const s = C.freshShop('gupta', TODAY);
+  C.runAction(s, 'owner', { text: 'Meena didi 300 ka saaman: dal 1 kilo 140, sabun 40' });
+  const t = s.txns[s.txns.length - 1];
+  assert.strictEqual(t.amount, 300);
+  assert.deepStrictEqual(t.lines.map((l) => [l.name, l.price]), [['dal', 140], ['sabun', 40], ['baaki saaman', 120]]);
+  // one total for two items with no remembered rates stays one amount, as before
+  C.runAction(s, 'owner', { text: 'Iqbal bhai ne haldi aur namak liya 60 ka' });
+  const u = s.txns[s.txns.length - 1];
+  assert.strictEqual(u.amount, 60); assert.strictEqual(u.lines, undefined); assert.strictEqual(u.items, 'haldi, namak');
+  // a remembered rate never overrides the total the owner said
+  C.runAction(s, 'owner', { text: 'Verma ji ne 2 kilo cheeni aur 1 litre tel liya 180 ka' });
+  const v = s.txns[s.txns.length - 1];
+  assert.strictEqual(v.amount, 180); assert.strictEqual(v.lines, undefined);
+});
+test('a new spoken rate replaces the old one; an unknown rate is asked for, not guessed', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const r = C.runAction(s, 'owner', { text: 'Sharma ji cheeni 2 kilo 96, tel 180' });
+  assert.strictEqual(s.prices.chini.rate, 48);
+  assert.strictEqual(s.prices.tel.unit, 'l'); // "tel 180" is one litre, the per-litre rate stays
+  assert.match(r.result.messages[0].text, /Cheeni ₹45\/kilo → ₹48\/kilo/);
+  const before = s.txns.length;
+  const q = C.runAction(s, 'owner', { text: 'Kavita aunty cheeni 1 kilo, kaju 200 gram' });
+  assert.strictEqual(s.txns.length, before);
+  assert.match(q.result.messages[0].text, /daam abhi yaad nahi: kaju/);
+});
+test('Devanagari bill', () => {
+  const s = C.freshShop('gupta', TODAY);
+  C.runAction(s, 'owner', { text: 'शर्मा जी चीनी 2 किलो 90, तेल 180, साबुन 40' });
+  const t = s.txns[s.txns.length - 1];
+  assert.strictEqual(t.amount, 310); assert.strictEqual(t.lines.length, 3);
+});

@@ -78,6 +78,7 @@
     const t = transliterate(String(text))
       .replace(/₹/g, ' rs ')
       .replace(/(\d),(?=\d)/g, '$1')
+      .replace(/[,;\n]+/g, ' aur ') // a comma or a new line separates bill items
       .replace(/(\d)(?=[a-zA-Z])/g, '$1 ')
       .replace(/([a-zA-Z])(?=\d)/g, '$1 ')
       .replace(/[^a-zA-Z0-9.@\s]/g, ' ')
@@ -284,6 +285,142 @@
     return parts.join(', ');
   }
 
+  // ------------------------------------------- item lines + the shop's own rate memory
+  // No scanner and no catalogue: the owner says the bill the way they already say it while packing,
+  // "cheeni 2 kilo 90, tel 180, sabun 40". Each spoken rate is remembered, so next time "cheeni 2 kilo, tel" is enough.
+  const UNIT_OF = { kilo: 'kg', kg: 'kg', kilogram: 'kg', gram: 'g', gm: 'g', g: 'g', pav: 'pav', pau: 'pav',
+    ltr: 'l', litre: 'l', liter: 'l', lit: 'l', l: 'l', ml: 'ml', paket: 'pkt', pkt: 'pkt', dojen: 'dozen', darjan: 'dozen', darjen: 'dozen',
+    piece: 'pc', pis: 'pc', pcs: 'pc', pc: 'pc', botal: 'bottle', botle: 'bottle', bori: 'bori', bag: 'bag', katta: 'bori', dibba: 'dibba', daba: 'dibba', box: 'box', tray: 'tray', kartan: 'box', karton: 'box' };
+  // every unit is stored against a base, so a rate learned per kilo also prices "500 gram"
+  const UNIT_BASE = { kg: ['kg', 1], g: ['kg', 0.001], pav: ['kg', 0.25], l: ['l', 1], ml: ['l', 0.001] };
+  const UNIT_SAY = { kg: 'kilo', g: 'gram', pav: 'pav', l: 'litre', ml: 'ml', pkt: 'packet', dozen: 'dozen', pc: 'piece', bottle: 'bottle' };
+  const baseOf = (u) => (u ? UNIT_BASE[u] || [u, 1] : ['', 1]);
+  const NOT_ITEM = new Set(['li', 'lia', 'lai', 'mal', 'bil', 'bill', 'jod', 'dam', 'bhav', 'rate', 'dege', 'denge', 'baki', 'udhar', 'ji', 'cash', 'upi'].map(normWord));
+  const isItemWord = (w) => /^[a-z]{2,}$/.test(w || '') && !STOP.has(w) && !HONORIFICS.has(w) && !NOT_ITEM.has(w) && !MULT[w] && NUMWORDS[w] == null;
+  const isNum = (w) => /^\d+(\.\d+)?$/.test(w || '') && !/^\d{10,}$/.test(w);
+
+  /** Split the words that are not the name or the date into lines: [{ words, qty, unit, price }], plus a stated total. */
+  function parseLines(tok, skip) {
+    const n = tok.norm, d = tok.display, lines = [], loose = [];
+    let cur = null, total = null;
+    const fresh = () => ({ words: [], qty: null, unit: null, price: null });
+    const flush = () => { if (cur && cur.words.length) lines.push(cur); else if (cur && cur.price != null) loose.push(cur.price); cur = null; };
+    const qtyAt = (i) => {
+      const w = n[i], u = UNIT_OF[n[i + 1]];
+      if (!u) return null;
+      const q = isNum(w) ? parseFloat(w) : w === 'dedh' ? 1.5 : w === 'dhai' ? 2.5 : (w === 'adha' || w === 'ada') ? 0.5 : NUMWORDS[w];
+      return q > 0 ? { qty: q, unit: u } : null;
+    };
+    for (let i = 0; i < n.length; i++) {
+      const w = n[i];
+      if (skip.has(i) || w === 'aur' || w === 'and') { flush(); continue; }
+      const q = qtyAt(i);
+      if (q) {
+        if (cur && cur.words.length && (cur.qty != null || cur.price != null)) flush();
+        cur = cur || fresh(); cur.qty = q.qty; cur.unit = q.unit; i++; continue;
+      }
+      if (isNum(w)) {
+        let v = parseFloat(w), j = i;
+        if (MULT[n[i + 1]]) { v *= MULT[n[i + 1]]; j++; }
+        const a1 = n[j + 1] || '', a2 = n[j + 2] || '';
+        const isTotal = /^(total|kul|jod)$/.test(n[i - 1] || '') || (/^(ka|ke|ki)$/.test(a1) && /^(saman|sauda|mal|udhar|bil|bill|hisab|rashan)$/.test(a2));
+        if (isTotal) { flush(); total = v; i = j; continue; }
+        if (cur && cur.words.length && cur.price == null) {
+          // "sabun 2" may be a count, not ₹2: itemize() decides with the remembered rate
+          cur.price = v; cur.bare = !cur.unit && j === i && !/^(rs|rupe|rupaye|rupaya|rupay|rupees|rupee|ka|ke|ki)$/.test(a1); i = j; flush(); continue;
+        }
+        if (/^(ka|ke|ki)$/.test(a1) && isItemWord(a2)) { flush(); cur = fresh(); cur.price = v; i = j + 1; continue; } // "90 ki cheeni"
+        if (j === i && v <= 50 && isItemWord(a1)) { flush(); cur = fresh(); cur.qty = v; continue; } // "3 maggi"
+        flush(); loose.push(v); i = j; continue;
+      }
+      if (isItemWord(w)) {
+        if (cur && cur.words.length && cur.price != null) flush();
+        cur = cur || fresh(); cur.words.push(i);
+      }
+    }
+    flush();
+    return {
+      lines: lines.map((l) => ({ name: l.words.map((k) => d[k].toLowerCase()).join(' '), key: l.words.map((k) => n[k]).join(' '), qty: l.qty, unit: l.unit, price: l.price, bare: !!l.bare })),
+      total, loose
+    };
+  }
+
+  const prices = (state) => (state.prices = state.prices || {});
+  /** A remembered rate for this line, converted to the unit spoken now; null if unknown or the units don't mix. */
+  function rateFor(state, line) {
+    const p = prices(state)[line.key];
+    if (!p) return null;
+    const [base, f] = baseOf(line.unit);
+    if (line.unit && base !== p.unit) return null;
+    const qty = line.unit ? line.qty * f : (line.qty || 1);
+    return { price: Math.round(p.rate * qty), rate: p.rate, unit: p.unit };
+  }
+  const qtyText = (l) => (l.qty == null ? '' : l.unit ? l.qty + ' ' + (UNIT_SAY[l.unit] || l.unit) : '×' + l.qty);
+  const rateText = (rate, unit) => rupees(rate) + (unit ? '/' + (UNIT_SAY[unit] || unit) : '');
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  /** One bill line as the customer reads it: "Cheeni 2 kilo = ₹90". */
+  function lineText(l) {
+    return cap(l.name) + (qtyText(l) ? ' ' + qtyText(l) : '') + ' = ' + (l.price < 0 ? '−' + rupees(-l.price) : rupees(l.price));
+  }
+  const billText = (lines) => lines.map((l) => '  • ' + lineText(l)).join('\n');
+
+  /**
+   * Turn a credit message into priced lines. Every rate the owner spoke is used as said; a missing one comes from the
+   * rate memory. A stated total wins, and the gap is shown as its own line, so the customer's list always adds up.
+   * Returns null when there is no list (the entry stays a single amount, as before).
+   */
+  function itemize(state, intent, text) {
+    if (['credit', 'unknown', 'promise'].indexOf(intent.intent) < 0) return null;
+    const lp = intent.lineParse || parseOwnerMessage(text, state.today).lineParse;
+    if (!lp || !lp.lines.length) return null;
+    const lines = lp.lines.map((l) => {
+      const x = Object.assign({}, l, { from: l.price != null ? 'spoken' : null });
+      const known = x.bare && prices(state)[x.key];
+      if (known && x.price < known.rate) { x.qty = x.price; x.price = null; x.from = null; } // "sabun 2" = two soaps when soap is ₹40
+      delete x.bare;
+      return x;
+    });
+    let total = lp.total != null ? lp.total : lp.loose.length === 1 ? lp.loose[0] : null;
+    const spoken = lines.filter((l) => l.from === 'spoken');
+    // one number with several items ("doodh aur bread 75") is the total, not the last item's price
+    if (spoken.length === 1 && lines.length > 1 && total == null) { total = spoken[0].price; spoken[0].price = null; spoken[0].from = null; }
+    if (total == null && intent.parser === 'llm' && intent.amount > 0 && spoken.length < lines.length) total = intent.amount;
+    for (const l of lines) if (l.price == null) { const r = rateFor(state, l); if (r) { l.price = r.price; l.rate = r.rate; l.rateUnit = r.unit; l.from = 'memory'; } }
+    const missing = lines.filter((l) => l.price == null);
+    if (missing.length === 1 && total != null) {
+      const rest = total - lines.reduce((s, l) => s + (l.price || 0), 0);
+      if (rest > 0) { missing[0].price = rest; missing[0].from = 'derived'; missing.length = 0; }
+    }
+    if (missing.length) {
+      if (total != null || !lines.some((l) => l.price != null)) return null; // say it the old way: one amount
+      return { missing: missing.map((l) => l.name) };
+    }
+    const sum = lines.reduce((s, l) => s + l.price, 0);
+    // a remembered rate never overrides what the owner just said: if the total doesn't match, keep it a single amount
+    if (total != null && Math.round(total - sum) && lines.some((l) => l.from === 'memory')) return null;
+    if (total != null && Math.round(total - sum)) lines.push({ name: total > sum ? 'baaki saaman' : 'chhoot', qty: null, unit: null, price: Math.round(total - sum), from: 'extra' });
+    return { lines, amount: total != null ? total : sum };
+  }
+
+  /** Every rate the owner says out loud becomes the shop's rate (a newer one replaces the old). */
+  function learnRates(state, lines) {
+    const notes = [];
+    for (const l of lines) {
+      if (l.from !== 'spoken' || !(l.price > 0)) continue;
+      const old = prices(state)[l.key];
+      // "tel 180" with no unit means one of the usual unit (a litre), so it never wipes out a per-litre rate
+      const [unit, f] = l.unit ? baseOf(l.unit) : [old ? old.unit : '', 1];
+      const rate = Math.round((l.price / (l.unit ? l.qty * f : (l.qty || 1))) * 100) / 100;
+      if (old && old.unit === unit && Math.abs(old.rate - rate) < 0.01) { old.date = state.today; continue; }
+      if (old && old.unit === unit) notes.push(cap(l.name) + ' ' + rateText(old.rate, unit) + ' → ' + rateText(rate, unit));
+      else notes.push(cap(l.name) + ' ' + rateText(rate, unit));
+      prices(state)[l.key] = { name: l.name, rate, unit, date: state.today };
+    }
+    return notes;
+  }
+  /** The shop's remembered rates, newest first (shown on the dashboard). */
+  const rateList = (state) => Object.keys(prices(state)).map((k) => Object.assign({ key: k }, prices(state)[k])).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.name < b.name ? -1 : 1));
+
   // -------------------------------------------------------------- parse
   /** Rule-based parser. Returns an intent object; an LLM parser should return the same shape. */
   function parseOwnerMessage(text, today) {
@@ -296,8 +433,10 @@
     const used = new Set(dueInfo.skip);
     if (nm) for (let i = nm.start; i < nm.end; i++) used.add(i);
     if (amt) { used.add(amt.idx); if (MULT[tok.norm[amt.idx + 1]]) used.add(amt.idx + 1); }
+    const lineSkip = new Set(dueInfo.skip);
+    if (nm) for (let i = nm.start; i < nm.end; i++) lineSkip.add(i);
     const out = {
-      items: extractItems(tok, used),
+      items: extractItems(tok, used), lineParse: parseLines(tok, lineSkip),
       intent: 'unknown', name: nm ? prettyName(nm.display) : null, nameKey: nm ? nameKey(nm.norm) : null,
       amount: amt ? amt.amount : null, dueDate: dueInfo.due, phone, raw: text, parser: 'rules'
     };
@@ -413,6 +552,9 @@
         reply('↩️ Hata diya: ' + c.name + ' ka ' + rupees(tx.amount) + ' ' + (tx.type === 'credit' ? 'udhaar' : 'jama') + '. Ab baaki: ' + rupees(balance(state, c.id)) + '.');
         return out;
       }
+      case 'need_rate':
+        reply('Inka daam abhi yaad nahi: ' + intent.missing.join(', ') + '. Daam ke saath ek baar boliye, jaise "' + intent.missing[0] + ' 40". Phir hamesha yaad rahega.\n(Entry abhi nahi likhi.)');
+        return out;
       case 'unknown':
         reply('Maaf kijiye, samajh nahi aaya 🙏 Aise boliye: "Sharma ji ne 340 ka saaman liya" ya "Pappu ne 200 jama kiye". (Help ke liye "help" likhein.)');
         return out;
@@ -443,11 +585,17 @@
         // a new entry keeps an existing future promise, but never inherits a date that has already passed
         const due = intent.dueDate || (cust.dueDate && cust.dueDate > state.today && balance(state, cust.id) > 0 ? cust.dueDate : addDays(state.today, state.shop.defaultDays));
         const tx = { id: nextId(state, 'T'), custId: cust.id, type: 'credit', amount: intent.amount, items: intent.items || '', date: state.today, dueDate: due, note: intent.raw || '', source: intent.source || 'text', parser: intent.parser || 'rules' };
+        if (intent.lines) tx.lines = intent.lines.map((l) => ({ name: l.name, qty: l.qty, unit: l.unit, price: l.price, from: l.from }));
         state.txns.push(tx);
+        const learned = intent.lines ? learnRates(state, intent.lines) : [];
+        const remembered = (intent.lines || []).filter((l) => l.from === 'memory');
         cust.dueDate = due; cust.reminderLevel = 0; cust.lastReminder = null;
         state.lastAction = { txnId: tx.id };
         log(state, 'credit', cust.name + ' +' + rupees(intent.amount) + ' (due ' + fmtDate(due) + ')');
-        let text = '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' + (intent.items ? ' (' + intent.items + ')' : '') + '.\nKul baaki: ' + rupees(balance(state, cust.id)) + '\n📅 ' +
+        let text = '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' +
+          (tx.lines ? ':\n' + billText(tx.lines) + (remembered.length ? '\n🧠 Daam yaad se: ' + remembered.map((l) => l.name + ' ' + rateText(l.rate, l.rateUnit)).join(', ') : '') +
+            (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko bhej di, woh "Haan / Galat" se check karenge.' : '')
+            : (intent.items ? ' (' + intent.items + ')' : '') + '.') + '\nKul baaki: ' + rupees(balance(state, cust.id)) + '\n📅 ' +
           (intent.dueDate ? 'Wada: ' + fmtDay(due) + '. Usi din yaad dila dunga.' : fmtDay(due) + ' ko yaad dila dunga (koi tareekh nahi boli thi).');
         if (!cust.phone) text += '\n📱 ' + cust.name + ' ka WhatsApp number bhej dijiye, reminder ke liye. Jaise: "' + cust.name + ' ka number 98xxxxxxxx"';
         reply(text);
@@ -505,6 +653,11 @@
     const intent = opts.intent || parseOwnerMessage(text, state.today);
     intent.source = opts.source || 'text';
     intent.raw = text;
+    const bill = itemize(state, intent, text);
+    if (bill && bill.lines) {
+      intent.intent = 'credit'; intent.amount = bill.amount; intent.lines = bill.lines;
+      intent.items = bill.lines.filter((l) => l.from !== 'extra').map((l) => l.name + (qtyText(l) ? ' ' + qtyText(l) : '')).join(', ');
+    } else if (bill && bill.missing && intent.nameKey) { intent.intent = 'need_rate'; intent.missing = bill.missing; }
     const out = applyIntent(state, intent);
     return { intent, messages: dedupe(out) };
   }
@@ -940,6 +1093,8 @@
     gupta: {
       shop: { id: 'gupta', name: 'Gupta Kirana Store', owner: 'Rakesh Gupta', upiId: 'guptakirana@upi', city: 'Guwahati' },
       seed: 7,
+      // rates the agent already learned from earlier entries: name, rate, unit
+      prices: [['cheeni', 45, 'kg'], ['atta', 42, 'kg'], ['chawal', 60, 'kg'], ['tel', 180, 'l'], ['doodh', 30, 'pkt'], ['maggi', 14, ''], ['biscuit', 10, '']],
       people: [
         // name, key, phone, reliability, known UPI IDs
         ['Sharma ji', 'sharma', '9876500001', 0.9, ['ramesh.sharma@okaxis']],
@@ -974,6 +1129,7 @@
     balaji: {
       shop: { id: 'balaji', name: 'Balaji Dairy & General', owner: 'Sunita Yadav', upiId: 'balajidairy@upi', city: 'Jorhat' },
       seed: 23,
+      prices: [['doodh', 60, 'l'], ['dahi', 80, 'kg'], ['paneer', 400, 'kg'], ['makhan', 56, 'pkt'], ['bread', 40, '']],
       people: [
         ['Anita bhabhi', 'anita', '9812300001', 0.95, ['anita.das@ybl']],
         ['Rafiq chacha', 'rafik', '9812300002', 0.8, []],
@@ -1035,6 +1191,7 @@
       c.dueDate = addDays(T, dueIn);
       if (dueIn < 0) { c.lastReminder = addDays(T, dueIn); c.reminderLevel = 1; }
     }
+    for (const [name, rate, unit] of cfg.prices || []) prices(state)[tokenize(name).norm.join(' ')] = { name, rate, unit, date: addDays(T, -3) };
     log(state, 'seed', 'Loaded 75 days of sample khata for ' + state.customers.length + ' customers of ' + state.shop.name);
     return state;
   }
@@ -1286,7 +1443,7 @@
       if (!c || !c.phone || t.voided || t.note === 'seed' || t.source === 'upi' || t.via === 'customer') continue;
       const bal = balance(state, c.id);
       emit(state, out, c.id, '📒 ' + state.shop.name + ': aapke khate mein ' + fmtDate(t.date) + ' ko ' + rupees(t.amount) + ' ' + typeHi(t) +
-        (t.items ? ' (' + t.items + ')' : '') + ' likha gaya.\nKul baaki: ' + rupees(Math.max(0, bal)) + '\nSahi hai? (24 ghante mein jawab na aaye toh sahi maana jayega)', { kind: 'entry-check', txnId: t.id });
+        (t.lines ? ' likha gaya:\n' + billText(t.lines) + '\n  Jod: ' + rupees(t.amount) : (t.items ? ' (' + t.items + ')' : '') + ' likha gaya.') + '\nKul baaki: ' + rupees(Math.max(0, bal)) + '\nSahi hai? (24 ghante mein jawab na aaye toh sahi maana jayega)', { kind: 'entry-check', txnId: t.id });
     }
   }
   function sendStatements(state) {
@@ -1437,6 +1594,8 @@
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
     runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
+    // item lines + rate memory
+    itemize, learnRates, rateList, billText,
     // utils
     transliterate, tokenize, addDays, daysBetween, fmtDate, fmtDay, rupees
   };

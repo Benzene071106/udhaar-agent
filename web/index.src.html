@@ -142,6 +142,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .sheet .row button { flex: 1; border-radius: 10px; padding: 10px; border: 1px solid var(--rule); background: var(--sheet); }
 .sheet .row .go { background: var(--cust-head); color: #fff; border: none; font-weight: 600; }
 
+/* ---------- rate memory ---------- */
+.rates .head { padding: 12px 16px 6px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.rates h2 { font: 1.2rem/1.1 var(--f-display); margin: 0; }
+.rates p { margin: 0 16px 8px; font-size: .8rem; color: var(--muted); }
+.rlist { list-style: none; margin: 0; padding: 0 12px 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.rlist li { font-size: .8rem; border: 1px solid var(--rule); border-radius: 999px; padding: 2px 10px; background: var(--chip); font-variant-numeric: tabular-nums; }
+.rlist li.new { border-color: var(--payment); }
 /* ---------- baaki list ---------- */
 .card { background: var(--sheet); border-radius: 14px; box-shadow: var(--shadow); border: 1px solid var(--rule); min-width: 0; }
 .baaki .head { padding: 14px 16px 8px; display: flex; align-items: baseline; gap: 10px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
@@ -331,7 +338,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     <li><span>Dukaandaar bolkar likhwaye: <b id="gEx">"Sharma ji ne 340 ka saaman liya, kal denge"</b></span></li>
     <li><span><b>Agle din ➜</b> dabaiye: agent khud reminder bhejta hai</span></li>
     <li><span><span id="gWho">Sharma ji</span> jaise chahein dein: <b>💵 Cash de diya</b> ya <b>UPI</b></span></li>
-    <li><span>Grahak ke phone par har entry: <b>Haan, sahi hai</b> ya <b>Galat hai</b>. Do-taraf khata, ✓ dono ne maana</span></li>
+    <li><span>Grahak ke phone par har entry, saaman aur daam ki list ke saath: <b>Haan, sahi hai</b> ya <b>Galat hai</b>. Do-taraf khata, ✓ dono ne maana</span></li>
     <li><span>Cash ya "galat hai" ho toh <b>Dukaan band 🌙</b>: ek tap mein ✅/❌ tay</span></li>
     <li><span><b>Galla Mic</b>: counter ki baat-cheet chalaiye, agent khud likhta hai</span></li>
   </ol>
@@ -405,6 +412,11 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
       <p class="scnote">Score sirf chukane ke record se banta hai. Cash ya UPI, kaise chukaya, isse score nahi badalta.</p>
       <div class="consent" id="scConsent"></div>
     </div>
+  </section>
+  <section class="card rates" aria-label="Rates the agent remembers">
+    <div class="head"><h2>Daam yaad</h2><small id="rCount"></small></div>
+    <p>Dukaandaar jo daam bolta hai, agent yaad rakhta hai. Agli baar sirf "cheeni 2 kilo" bolna kaafi. Naya daam bola toh purana badal jaata hai.</p>
+    <ul class="rlist" id="rlist"></ul>
   </section>
   <section class="card baaki" aria-label="Who owes what">
     <div class="head"><h2>Kiska kitna baaki</h2><span class="sum"><small>Kul</small><span id="bTotal">₹0</span></span></div>
@@ -807,10 +819,16 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
   $('odList').addEventListener('click', pickCust);
   $('odList').addEventListener('keydown', (e) => { if (e.key === 'Enter') pickCust(e); });
 
+  function renderRates() {
+    const r = C.rateList(state);
+    $('rCount').textContent = r.length ? r.length + ' cheezein' : '';
+    $('rlist').innerHTML = r.length ? r.map((x) => '<li' + (x.date === state.today ? ' class="new"' : '') + '>' + esc(x.name) + ' ' + esc(C.rupees(x.rate)) +
+      (x.unit ? '/' + esc({ kg: 'kilo', l: 'litre', pkt: 'packet', pc: 'piece' }[x.unit] || x.unit) : '') + '</li>').join('') : '<li>Abhi koi daam yaad nahi</li>';
+  }
   function render() {
     if (!state) return;
     $('todayText').textContent = C.fmtDay(state.today);
-    renderShops(); renderOwner(); renderCustomer(); renderScore(); renderBaaki(); renderDash(); renderKhata(); renderEngine(); save();
+    renderShops(); renderOwner(); renderCustomer(); renderScore(); renderBaaki(); renderRates(); renderDash(); renderKhata(); renderEngine(); save();
   }
   let toastT;
   function toast(t) { const el = $('toast'); el.textContent = t; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { el.hidden = true; }, 4200); }
@@ -889,7 +907,8 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
   SAMPLES_BY.gupta = [
     ['🎙', 'Sharma ji ne 340 ka saaman liya, kal denge', 'Sharma ji ne 340 ka saaman liya, kal denge', 4, 'voice'],
     ['🎙', 'शर्मा जी… (Hindi)', 'शर्मा जी ने 340 का सामान लिया, कल देंगे', 5, 'voice'],
-    ['🎙', '2 kilo cheeni + tel', 'Verma ji ne 2 kilo cheeni aur 1 litre tel liya 180 ka', 5, 'voice'],
+    ['🎙', 'Bill: cheeni, tel, sabun', 'Sharma ji cheeni 2 kilo 90, tel 1 litre 180, sabun 40, kal denge', 7, 'voice'],
+    ['🎙', 'Daam yaad se: Pappu', 'Pappu ne 500 gram cheeni, sabun 2 aur adha litre tel liya', 5, 'voice'],
     ['🎙', 'aaj ka hisaab', 'Aaj ka hisaab batao', 2, 'voice'],
     ['🎙', 'Pappu ko yaad dilao', 'Pappu ko yaad dila do', 2, 'voice'],
     ['📩', 'Bank SMS forward', 'Rs 700.00 received from MEENA KUMARI via Google Pay on ' + 'today' + '. UPI Ref 551200987654', 0, 'sms'],
@@ -898,6 +917,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
   ];
   SAMPLES_BY.balaji = [
     ['🎙', 'Anita bhabhi: doodh, paneer', 'Anita bhabhi ne 2 litre doodh aur paneer liya 160 ka, kal denge', 5, 'voice'],
+    ['🎙', 'Daam yaad se: Pinky', 'Pinky didi doodh 2 litre, paneer 200 gram aur bread', 5, 'voice'],
     ['🎙', 'मिश्रा जी… (Hindi)', 'मिश्रा जी ने 300 का दही और मक्खन लिया, शनिवार को देंगे', 5, 'voice'],
     ['🎙', 'aaj ka hisaab', 'Aaj ka hisaab batao', 2, 'voice'],
     ['🎙', 'Suresh ko yaad dilao', 'Suresh driver ko yaad dila do', 2, 'voice'],

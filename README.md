@@ -25,6 +25,16 @@ Opened as a file, the demo keeps each shop's state in the browser's local storag
 - **Galat hai** goes into the owner's evening batch next to the cash claims. ✅ means the entry stays (the customer is told to talk at the shop); ❌ means it was a mistake, and the entry is removed with an apology to the customer. Neither one counts as a dispute in the credit score.
 - **Monthly statement:** on the 1st of each month (or the **📄 Mahine ka hisaab** button) every customer with a balance gets their total and last entries, with the same two buttons. Haan shows **✓ Grahak ne maana** in the baaki list while the balance is unchanged.
 
+## Bill with rates (no scanner)
+
+Most kirana shops have no barcode or QR scanner, so the bill comes from the owner's voice. While packing, the owner already says the items and prices out loud: **"Sharma ji cheeni 2 kilo 90, tel 1 litre 180, sabun 40, kal denge"**.
+
+- The agent splits it into lines, adds them up, and the customer's WhatsApp gets the list (`Cheeni 2 kilo = ₹90`, `Tel 1 litre = ₹180`, `Sabun = ₹40`, `Jod: ₹310`) with the same **Haan, sahi hai / Galat hai** buttons. A wrong item or rate is what gets disputed.
+- **Daam yaad (rate memory):** every rate the owner speaks is remembered per kilo, litre, packet or piece. Next time **"Pappu ne 500 gram cheeni, sabun 2 aur adha litre tel liya"** is enough: the agent fills ₹23, ₹80 and ₹90 itself and says which rates came from memory. A new spoken rate replaces the old one, and the owner's reply says so (`Cheeni ₹45/kilo → ₹48/kilo`).
+- **A total the owner says wins.** "300 ka saaman: dal 140, sabun 40" adds a `Baaki saaman = ₹120` line so the list still adds up. A remembered rate never overrides a spoken total; if they don't match, the entry stays one amount, as before.
+- A rate the agent doesn't know is asked for once ("kaju ka daam abhi yaad nahi"), and nothing is written until the owner says it. No catalogue to set up.
+- Time for the owner: 10 to 20 seconds of speaking for 5 or 6 items, done while packing. Nothing to tap.
+
 ## Copy photo (future / experimental)
 
 Not the owner's first action: voice and text are. The 📷 button stays for trying it out. Reading accuracy on real handwritten copies is untested.
@@ -226,9 +236,9 @@ Edit `core/`, `web/` or `server/`, then rebuild. Never edit `dist/` by hand.
 node --test test/core.test.js test/server.test.js
 ```
 
-There are 35 tests:
+There are 39 tests:
 
-- **Core (25):** do-taraf khata (Haan sets ✓, no reply in 24 hours counts as accepted but galat still works, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
+- **Core (29):** bill with rates (spoken lines, the customer's list, rate memory with grams, half litres and counts, a stated total wins, a new rate replaces the old one, an unknown rate is asked for, Devanagari); do-taraf khata (Haan sets ✓, no reply in 24 hours counts as accepted but galat still works, answering twice or as someone else does nothing, who is not asked, Galat into the batch then ✅ keeps / ❌ removes with no score penalty, monthly statement on the 1st and by button); copy photo (daily page, one page per customer, first-day opening balances: dedupe against the khata, nothing written before ✅, edit, skip, ambiguous names, the same photo twice); parsing Hinglish and Devanagari (names, amounts, number words, dates, items), the ledger, the reminder ladder, UPI matching, cash claims and confirmation, the Galla Mic, two separate shops, the dashboard numbers, the credit score (cash never penalized, disputes cost points), and consent (nothing shared without yes, revoke, expiry, no number).
 - **Server (10):**
   - each shop keeps its own khata file and it survives a restart
   - the page is served with the shop config
