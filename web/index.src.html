@@ -447,6 +447,10 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
       <h3>Late wale (sabse purane upar)</h3>
       <ul class="plist" id="odList"></ul>
     </div>
+    <div>
+      <h3>Supplier ka khata (dukaan ko dena)</h3>
+      <ul class="plist" id="supList"></ul>
+    </div>
   </div>
 </section>
 
@@ -776,6 +780,10 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     const wk = d.week;
     if (wk && wk.owed) $('kToday').textContent += '\n📦 Is hafte supplier ko ' + C.rupees(wk.owed) + ' dena · grahakon se ummeed ' + C.rupees(wk.incoming) + (wk.shortfall ? ' · ⚠️ kam padega ' + C.rupees(wk.shortfall) : ' · ✅ pura') + (wk.remindFirst.length ? ' · pehle yaad dilao: ' + wk.remindFirst.map((x) => x.name).join(', ') : '');
     $('kCash').textContent = C.rupees(d.pendingCash); $('kCashSub').textContent = d.pendingCount ? d.pendingCount + ' claim · Dukaan band par ✅/❌' : 'sab confirm';
+    const sl = d.suppliers || [];
+    $('supList').innerHTML = sl.length ? sl.map((x) => '<li><span class="ini">' + esc(initial(x.name)) + '</span><span class="nm">' + esc(x.name) + '</span><span class="amt">' + esc(C.rupees(x.owed)) + '</span><span class="st">' +
+      (x.nextDue < d.asOf ? '<span class="late">' + C.daysBetween(x.nextDue, d.asOf) + ' din late</span>' : '<span>' + esc(C.fmtDay(x.nextDue)) + ' tak</span>') + '</span></li>').join('')
+      : '<li class="odempty">Kisi supplier ka kuch dena baaki nahi.</li>';
     $('odList').innerHTML = d.overdue.length ? d.overdue.map((o) => '<li data-c="' + o.id + '" tabindex="0"><span class="ini">' + esc(initial(o.name)) + '</span><span class="nm">' + esc(o.name) + '</span>' +
       '<span class="amt">' + esc(C.rupees(o.amount)) + '</span><span class="st"><span class="late">' + o.daysLate + ' din late</span>' +
       (o.reminderLevel ? '<span>Reminder ' + o.reminderLevel + '/3</span>' : '') + (o.phone ? '' : '<span>Number nahi</span>') + '</span></li>').join('')

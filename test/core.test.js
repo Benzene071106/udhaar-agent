@@ -726,3 +726,23 @@ test('naye log: each on-time repayment raises the limit one step; a guest cannot
   C.runAction(s, 'customer', { custId: g.id, text: 'Amit 9822233344 mera dost hai, main jaanta hoon' });
   assert.ok(!s.customers.some((c) => c.phone === '9822233344'));
 });
+
+test('wholesaler khata: item lines, payments oldest first, one supplier\'s hisaab, and the list of whom to pay', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const say = (t) => C.runAction(s, 'owner', { text: t }).result.messages.filter((m) => m.to === 'owner').map((m) => m.text).join('\n');
+  const before = s.txns.length;
+  assert.match(say('Agrawal se 10 bori aata 4500 udhaar'), /Agrawal Traders ka ₹4,500 maal udhaar \(Aata 10 bori ₹4,500\)[^]*kul baaki: ₹18,500/);
+  assert.match(say('Hindustan agency se 20 peti tel 3400 aur 5 bori cheeni 2100 udhaar, 25 tareekh tak'), /Hindustan Agency ka ₹5,500 maal udhaar \(Tel 20 peti ₹3,400, Cheeni 5 bori ₹2,100\)/);
+  assert.strictEqual(s.txns.length, before, 'supplier entries never touch the customers\' khata');
+  assert.match(say('Agrawal ko 16000 de diye'), /Ab bhi dena hai: ₹2,500/);
+  const old = s.supplies.find((k) => k.name === 'Agrawal Traders' && k.amount === 14000);
+  assert.strictEqual(old.paid, 14000, 'the oldest maal is paid first');
+  const h = say('Agrawal traders ka hisaab');
+  assert.match(h, /Agrawal Traders ka khata\nMaal udhaar:\n.*₹14,000[^]*₹4,500 \(Aata 10 bori ₹4,500\)[^]*Diye:\n.*₹16,000\nBaaki dena: ₹2,500/);
+  assert.strictEqual(say('Agrawal ka kitna baaki hai'), h);
+  const l = say('kisko kitna dena hai');
+  assert.match(l, /Supplier ko dena: ₹11,500\n.*Agrawal Traders ₹2,500[^]*Hindustan Agency ₹9,000/);
+  assert.deepStrictEqual(C.dashboard(s).suppliers.map((x) => [x.name, x.owed]), [['Agrawal Traders', 2500], ['Hindustan Agency', 9000]]);
+  // customers are untouched by all of this
+  assert.match(say('Sharma ji ka hisaab'), /📒 Sharma ji/);
+});
