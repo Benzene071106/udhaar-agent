@@ -563,3 +563,25 @@ test('a customer asking "kitna baaki hai" gets the hisaab, never a payment-date 
   C.runAction(s, 'customer', { custId: fresh.id, text: 'theek hai bhai' });
   assert.doesNotMatch(s.messages.slice(k).find((m) => m.to === fresh.id).text, /Kab tak/);
 });
+
+test('owner "aaj ka hisaab": today\'s udhaar, money back by cash and UPI, total, top 3, pending cash and disputes', () => {
+  const s = C.freshShop('gupta', TODAY);
+  const base = C.todayStats(s);
+  C.runAction(s, 'owner', { text: 'Sharma ji ne 2 kilo cheeni 90 liya' });
+  C.runAction(s, 'owner', { text: 'Pappu ne 100 jama kiye' });
+  const v = s.customers.find((c) => c.name === 'Verma ji');
+  C.runAction(s, 'customer', { custId: v.id, text: 'cash de diya' });
+  const t = C.todayStats(s);
+  assert.strictEqual(t.newCredit, base.newCredit + 90); assert.strictEqual(t.newCreditCount, base.newCreditCount + 1);
+  assert.strictEqual(t.backCash, base.backCash + 100); assert.strictEqual(t.pendingCash, base.pendingCash + 1);
+  assert.strictEqual(t.top.length, 3);
+  for (const q of ['aaj ka hisaab', 'total baaki', 'kaun kaun baaki']) {
+    const text = C.runAction(s, 'owner', { text: q }).result.messages[0].text;
+    assert.match(text, new RegExp('Aaj naya udhaar: ' + C.rupees(t.newCredit).replace('₹', '₹') + ' \\(' + t.newCreditCount + ' entry\\)'), q);
+    assert.match(text, /Aaj wapas aaya: .*cash .*UPI/, q);
+    assert.match(text, new RegExp('Kul baaki: ' + C.rupees(t.outstanding).replace(',', ',') + ' \\(' + t.owingCount + ' log\\)'), q);
+    assert.match(text, /Sabse zyada: /, q);
+    assert.match(text, /Cash ✅ baaki: \d+ · ❗ Grahak ne galat bataya: \d+/, q);
+  }
+  assert.deepStrictEqual(C.dashboard(s).today.top, t.top);
+});

@@ -841,22 +841,35 @@
     return out;
   }
 
-  function summaryText(state, when) {
-    const today = state.today;
-    const tx = state.txns.filter((t) => t.date === today && !t.voided);
+  /** Today's numbers for the owner: the same figures on WhatsApp, in the evening summary and on the dashboard. */
+  function todayStats(state) {
+    const tx = state.txns.filter((t) => t.date === state.today && !t.voided);
+    const sum = (a) => Math.round(a.reduce((s, t) => s + t.amount, 0));
     const cr = tx.filter((t) => t.type === 'credit'), pay = tx.filter((t) => t.type === 'payment');
-    const sum = (a) => a.reduce((s, t) => s + t.amount, 0);
     const owing = state.customers.map((c) => ({ c, b: balance(state, c.id) })).filter((x) => x.b > 0).sort((a, b) => b.b - a.b);
-    const overdue = owing.filter((x) => x.c.dueDate && x.c.dueDate < today);
-    const tomorrow = owing.filter((x) => x.c.dueDate === addDays(today, 1));
+    const pend = claims(state).filter((k) => k.status === 'pending');
+    return {
+      newCredit: sum(cr), newCreditCount: cr.length,
+      back: sum(pay), backCount: pay.length, backCash: sum(pay.filter((t) => t.source !== 'upi')), backUpi: sum(pay.filter((t) => t.source === 'upi')), // the owner's own "jama" is cash in hand
+      outstanding: Math.round(totalOutstanding(state)), owingCount: owing.length,
+      payers: pay.map((t) => getCust(state, t.custId).name + ' ' + rupees(t.amount)),
+      top: owing.slice(0, 3).map((x) => ({ id: x.c.id, name: x.c.name, amount: Math.round(x.b) })),
+      pendingCash: pend.filter((k) => k.type !== 'check').length, disputes: pend.filter((k) => k.type === 'check').length,
+      owing
+    };
+  }
+  function summaryText(state, when) {
+    const today = state.today, s = todayStats(state);
+    const overdue = s.owing.filter((x) => x.c.dueDate && x.c.dueDate < today);
+    const tomorrow = s.owing.filter((x) => x.c.dueDate === addDays(today, 1));
     return (when === 'evening' ? '🌙 Aaj ka hisaab, ' : '📊 Hisaab, ') + fmtDay(today) + '\n' +
-      'Naya udhaar: ' + rupees(sum(cr)) + ' (' + cr.length + ' entry)\n' +
-      'Wapas aaya: ' + rupees(sum(pay)) + (pay.length ? ' (' + pay.map((t) => getCust(state, t.custId).name + ' ' + rupees(t.amount)).join(', ') + ')' : '') + '\n' +
-      'Kul baaki: ' + rupees(totalOutstanding(state)) + ' (' + owing.length + ' log)\n' +
-      (claims(state).some((k) => k.status === 'pending') ? '💵 Confirm karna hai: ' + claims(state).filter((k) => k.status === 'pending').length + ' (neeche)\n' : '') +
-      (overdue.length ? '⚠️ Late: ' + overdue.slice(0, 5).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') + '\n' : '') +
-      (tomorrow.length ? '📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') + '\n' : '') +
-      (owing.length ? 'Sabse zyada: ' + owing.slice(0, 3).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') : '');
+      'Aaj naya udhaar: ' + rupees(s.newCredit) + ' (' + s.newCreditCount + ' entry)\n' +
+      'Aaj wapas aaya: ' + rupees(s.back) + (s.back ? ' (cash ' + rupees(s.backCash) + ', UPI ' + rupees(s.backUpi) + ': ' + s.payers.slice(0, 4).join(', ') + (s.payers.length > 4 ? ' +' + (s.payers.length - 4) : '') + ')' : '') + '\n' +
+      'Kul baaki: ' + rupees(s.outstanding) + ' (' + s.owingCount + ' log)\n' +
+      (s.top.length ? 'Sabse zyada: ' + s.top.map((x) => x.name + ' ' + rupees(x.amount)).join(', ') + '\n' : '') +
+      '💵 Cash ✅ baaki: ' + s.pendingCash + ' · ❗ Grahak ne galat bataya: ' + s.disputes +
+      (overdue.length ? '\n⚠️ Late: ' + overdue.slice(0, 5).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') : '') +
+      (tomorrow.length ? '\n📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') : '');
   }
   /** Closing time: one summary, then one batch of cash claims for the owner to tick ✅ or ❌. */
   function runEveningSummary(state) {
@@ -1373,7 +1386,7 @@
       overdueAmount: Math.round(overdue.reduce((s, x) => s + x.amount, 0)), overdue,
       collectionRate: dueTotal ? paidTotal / dueTotal : null, onTimeRate: dueTotal ? onTime / dueTotal : null, dueInWindow: Math.round(dueTotal),
       avgDaysToRecover: prof.avgDaysToRecover, pendingCash: pendingClaims.reduce((s, k) => s + k.amount, 0), pendingCount: pendingClaims.length,
-      daily
+      daily, today: (({ owing, payers, ...t }) => t)(todayStats(state))
     };
   }
 
@@ -1782,7 +1795,7 @@
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats,
     // real WhatsApp channel
     looksLikeCounter, counterIntent,
     customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),

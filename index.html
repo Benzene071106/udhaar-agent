@@ -248,6 +248,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
 .dash h2 { font: 1.45rem/1.1 var(--f-display); margin: 0; }
 .dash .dhead span { color: var(--muted); font-size: .88rem; }
 .dash h3 { font-size: .74rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+.kpitoday { grid-column: 1 / -1; font-size: 14px; color: var(--muted, #5b564b); }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px 18px 4px; }
 @media (max-width: 900px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .kpi { border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -440,6 +441,7 @@ tr.fresh td { animation: inkin 1.8s ease-out; }
     <div class="kpi late"><small>Wade se late</small><b id="kLate">₹0</b><span id="kLateSub"></span></div>
     <div class="kpi"><small>Wasooli dar · 30 din</small><b id="kRate">—</b><span id="kRateSub"></span></div>
     <div class="kpi"><small>Cash confirm baaki</small><b id="kCash">₹0</b><span id="kCashSub"></span></div>
+    <div class="kpitoday" id="kToday"></div>
   </div>
   <div class="dgrid">
     <div class="chartbox" id="chartbox">
@@ -3157,6 +3159,7 @@ var qrcode = function() {
       const x = Object.assign({}, l, { from: l.price != null ? 'spoken' : null });
       const known = x.bare && prices(state)[x.key];
       if (known && x.price < known.rate) { x.qty = x.price; x.price = null; x.from = null; } // "sabun 2" = two soaps when soap is ₹40
+      if (x.from === 'spoken' && !x.bare && x.qty == null && !x.unit) x.amountOnly = true; // "120 ka doodh"
       delete x.bare;
       return x;
     });
@@ -3191,6 +3194,9 @@ var qrcode = function() {
       // "tel 180" with no unit means one of the usual unit (a litre), so it never wipes out a per-litre rate
       const [unit, f] = l.unit ? baseOf(l.unit) : [old ? old.unit : '', 1];
       const rate = Math.round((l.price / (l.unit ? l.qty * f : (l.qty || 1))) * 100) / 100;
+      // with no quantity, "120 ka doodh" is money spent, not a rate; "sabun 40" teaches a per-piece rate only for an
+      // item counted in pieces, never one sold by kilo, litre or packet
+      if (!l.unit && l.qty == null && (l.amountOnly || (old && old.unit))) continue;
       if (old && old.unit === unit && Math.abs(old.rate - rate) < 0.01) { old.date = state.today; continue; }
       if (old && old.unit === unit) notes.push(cap(l.name) + ' ' + rateText(old.rate, unit) + ' → ' + rateText(rate, unit));
       else notes.push(cap(l.name) + ' ' + rateText(rate, unit));
@@ -3499,7 +3505,7 @@ var qrcode = function() {
         const heardSum = said != null ? tx.lines.filter((l) => l.from !== 'extra').reduce((a, l) => a + l.price, 0) : null;
         let text = (ct ? '🧾 Dukaan ki baat se bill. ' : '') + '✅ Likh liya: ' + cust.name + ', ' + rupees(intent.amount) + ' udhaar' +
           (tx.lines ? ':\n' + billText(tx.lines) + (remembered.length ? '\n🧠 Daam yaad se: ' + remembered.map((l) => l.name + ' ' + rateText(l.rate, l.rateUnit)).join(', ') : '') +
-            (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko bhej di, woh "Haan / Galat" se check karenge.' : '')
+            (learned.length ? '\n📝 Naya daam yaad kiya: ' + learned.join(', ') : '') + (cust.phone ? '\n📤 Yeh list ' + cust.name + ' ko WhatsApp par bhej rahe hain, woh "Haan / Galat" se check karenge.' : '')
             : (intent.items ? ' (' + intent.items + ')' : '') + '.') + '\nKul baaki: ' + rupees(balance(state, cust.id)) + '\n📅 ' +
           (intent.dueDate ? 'Wada: ' + fmtDay(due) + '. Usi din yaad dila dunga.' : fmtDay(due) + ' ko yaad dila dunga (koi tareekh nahi boli thi).');
         if (said != null && Math.round(said - heardSum)) text += '\n⚠️ Items ka jod ' + rupees(heardSum) + ', bola gaya total ' + rupees(said) + '. ' + rupees(said) + ' likha. Galat ho toh "galti" boliye.';
@@ -3617,22 +3623,35 @@ var qrcode = function() {
     return out;
   }
 
-  function summaryText(state, when) {
-    const today = state.today;
-    const tx = state.txns.filter((t) => t.date === today && !t.voided);
+  /** Today's numbers for the owner: the same figures on WhatsApp, in the evening summary and on the dashboard. */
+  function todayStats(state) {
+    const tx = state.txns.filter((t) => t.date === state.today && !t.voided);
+    const sum = (a) => Math.round(a.reduce((s, t) => s + t.amount, 0));
     const cr = tx.filter((t) => t.type === 'credit'), pay = tx.filter((t) => t.type === 'payment');
-    const sum = (a) => a.reduce((s, t) => s + t.amount, 0);
     const owing = state.customers.map((c) => ({ c, b: balance(state, c.id) })).filter((x) => x.b > 0).sort((a, b) => b.b - a.b);
-    const overdue = owing.filter((x) => x.c.dueDate && x.c.dueDate < today);
-    const tomorrow = owing.filter((x) => x.c.dueDate === addDays(today, 1));
+    const pend = claims(state).filter((k) => k.status === 'pending');
+    return {
+      newCredit: sum(cr), newCreditCount: cr.length,
+      back: sum(pay), backCount: pay.length, backCash: sum(pay.filter((t) => t.source !== 'upi')), backUpi: sum(pay.filter((t) => t.source === 'upi')), // the owner's own "jama" is cash in hand
+      outstanding: Math.round(totalOutstanding(state)), owingCount: owing.length,
+      payers: pay.map((t) => getCust(state, t.custId).name + ' ' + rupees(t.amount)),
+      top: owing.slice(0, 3).map((x) => ({ id: x.c.id, name: x.c.name, amount: Math.round(x.b) })),
+      pendingCash: pend.filter((k) => k.type !== 'check').length, disputes: pend.filter((k) => k.type === 'check').length,
+      owing
+    };
+  }
+  function summaryText(state, when) {
+    const today = state.today, s = todayStats(state);
+    const overdue = s.owing.filter((x) => x.c.dueDate && x.c.dueDate < today);
+    const tomorrow = s.owing.filter((x) => x.c.dueDate === addDays(today, 1));
     return (when === 'evening' ? '🌙 Aaj ka hisaab, ' : '📊 Hisaab, ') + fmtDay(today) + '\n' +
-      'Naya udhaar: ' + rupees(sum(cr)) + ' (' + cr.length + ' entry)\n' +
-      'Wapas aaya: ' + rupees(sum(pay)) + (pay.length ? ' (' + pay.map((t) => getCust(state, t.custId).name + ' ' + rupees(t.amount)).join(', ') + ')' : '') + '\n' +
-      'Kul baaki: ' + rupees(totalOutstanding(state)) + ' (' + owing.length + ' log)\n' +
-      (claims(state).some((k) => k.status === 'pending') ? '💵 Confirm karna hai: ' + claims(state).filter((k) => k.status === 'pending').length + ' (neeche)\n' : '') +
-      (overdue.length ? '⚠️ Late: ' + overdue.slice(0, 5).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') + '\n' : '') +
-      (tomorrow.length ? '📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') + '\n' : '') +
-      (owing.length ? 'Sabse zyada: ' + owing.slice(0, 3).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') : '');
+      'Aaj naya udhaar: ' + rupees(s.newCredit) + ' (' + s.newCreditCount + ' entry)\n' +
+      'Aaj wapas aaya: ' + rupees(s.back) + (s.back ? ' (cash ' + rupees(s.backCash) + ', UPI ' + rupees(s.backUpi) + ': ' + s.payers.slice(0, 4).join(', ') + (s.payers.length > 4 ? ' +' + (s.payers.length - 4) : '') + ')' : '') + '\n' +
+      'Kul baaki: ' + rupees(s.outstanding) + ' (' + s.owingCount + ' log)\n' +
+      (s.top.length ? 'Sabse zyada: ' + s.top.map((x) => x.name + ' ' + rupees(x.amount)).join(', ') + '\n' : '') +
+      '💵 Cash ✅ baaki: ' + s.pendingCash + ' · ❗ Grahak ne galat bataya: ' + s.disputes +
+      (overdue.length ? '\n⚠️ Late: ' + overdue.slice(0, 5).map((x) => x.c.name + ' ' + rupees(x.b)).join(', ') : '') +
+      (tomorrow.length ? '\n📅 Kal ke reminder: ' + tomorrow.map((x) => x.c.name).join(', ') : '');
   }
   /** Closing time: one summary, then one batch of cash claims for the owner to tick ✅ or ❌. */
   function runEveningSummary(state) {
@@ -3737,6 +3756,14 @@ var qrcode = function() {
     const tok = tokenize(text);
     const due = extractDue(tok, state.today).due;
     const bal = balance(state, c.id);
+    // "kitna baaki hai", "balance", "meri list": the customer gets the hisaab, never a payment-date question
+    if (/\s(kitna|kitana|kitne|kitni|balance|bakaya|hisab|hisaab|list|statement|khata)\s/.test(tok.text) && !/\s(diya|diye|kar diya|bhej diya)\s/.test(tok.text) && !due) {
+      if (Math.round(bal) <= 0) { emit(state, out, c.id, 'Aapka koi baaki nahi hai 🙏 - ' + state.shop.name); return out; }
+      const recent = state.txns.filter((t) => t.custId === c.id && !t.voided).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0).slice(-4)
+        .map((t) => '  ' + fmtDate(t.date) + ': ' + rupees(t.amount) + ' ' + typeHi(t) + (t.lines ? '\n' + billText(t.lines) : t.items ? ' (' + t.items + ')' : '')).join('\n');
+      emit(state, out, c.id, '📄 ' + state.shop.name + '\nAapke naam: ' + rupees(Math.round(bal)) + ' baaki\nPichli entries:\n' + recent + '\nKya yeh hisaab sahi hai?', { kind: 'statement', balance: Math.round(bal) });
+      return out;
+    }
     if (/\s(cash|nakad|nakd|nagad|naqad|haath me|hath me)\s/.test(tok.text) && !due) {
       const amt = extractAmount(tok, new Set());
       const amount = amt && amt.amount > 0 ? amt.amount : Math.max(0, bal - pendingCash(state, c.id));
@@ -3765,7 +3792,9 @@ var qrcode = function() {
       emit(state, out, 'owner', '💬 ' + c.name + ' abhi ' + rupees(part.amount) + ' dena chahte hain.');
       return out;
     }
-    emit(state, out, c.id, 'Dhanyavaad 🙏 Kab tak de payenge? Jaise "Shukravar ko" ya "5 tareekh".');
+    // a payment date is asked only after a reminder; anything else gets the short menu, and the owner sees the message
+    if (bal > 0 && (c.reminderLevel > 0 || c.lastReminder) && !/^\s*(hi+|hello|helo|hey|namaste|namaskar|ram ram|jai shri krishna|good morning)(\s+ji)?\s*$/.test(tok.text)) emit(state, out, c.id, 'Dhanyavaad 🙏 Kab tak de payenge? Jaise "Shukravar ko" ya "5 tareekh".');
+    else emit(state, out, c.id, 'Namaste 🙏 Aap aise likh sakte hain:\n• "Kitna baaki hai"\n• "Cash de diya"\n• "Shukravar ko dunga"');
     emit(state, out, 'owner', '💬 ' + c.name + ': "' + text + '"');
     return out;
   }
@@ -4139,7 +4168,7 @@ var qrcode = function() {
       overdueAmount: Math.round(overdue.reduce((s, x) => s + x.amount, 0)), overdue,
       collectionRate: dueTotal ? paidTotal / dueTotal : null, onTimeRate: dueTotal ? onTime / dueTotal : null, dueInWindow: Math.round(dueTotal),
       avgDaysToRecover: prof.avgDaysToRecover, pendingCash: pendingClaims.reduce((s, k) => s + k.amount, 0), pendingCount: pendingClaims.length,
-      daily
+      daily, today: (({ owing, payers, ...t }) => t)(todayStats(state))
     };
   }
 
@@ -4548,7 +4577,7 @@ var qrcode = function() {
     // llm
     llmRequestParts, intentFromLlm, copyReadRequest, cleanReading, COPY_SCHEMA,
     // shared action layer
-    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept,
+    runAction, freshShop, looksLikeUpiSms, ACTIONS, openChecks, autoAccept, todayStats,
     // real WhatsApp channel
     looksLikeCounter, counterIntent,
     customerFromWhatsapp, shortAnswer, claimLabel, pendingClaims: (state) => claims(state).filter((k) => k.status === 'pending'),
@@ -4854,6 +4883,8 @@ var qrcode = function() {
     $('kLate').textContent = C.rupees(d.overdueAmount); $('kLateSub').textContent = d.overdue.length ? d.overdue.length + ' log wade se late' : 'koi late nahi';
     $('kRate').textContent = d.collectionRate == null ? '—' : Math.round(d.collectionRate * 100) + '%';
     $('kRateSub').textContent = d.collectionRate == null ? 'pichhle 30 din mein koi wada nahi' : C.rupees(d.dueInWindow) + ' ka wada tha · ' + Math.round(d.onTimeRate * 100) + '% time par';
+    const td = d.today;
+    $('kToday').textContent = 'Aaj: ' + C.rupees(td.newCredit) + ' naya udhaar (' + td.newCreditCount + ') · ' + C.rupees(td.back) + ' wapas (cash ' + C.rupees(td.backCash) + ', UPI ' + C.rupees(td.backUpi) + ')' + (td.disputes ? ' · ❗ ' + td.disputes + ' grahak ne galat bataya' : '');
     $('kCash').textContent = C.rupees(d.pendingCash); $('kCashSub').textContent = d.pendingCount ? d.pendingCount + ' claim · Dukaan band par ✅/❌' : 'sab confirm';
     $('odList').innerHTML = d.overdue.length ? d.overdue.map((o) => '<li data-c="' + o.id + '" tabindex="0"><span class="ini">' + esc(initial(o.name)) + '</span><span class="nm">' + esc(o.name) + '</span>' +
       '<span class="amt">' + esc(C.rupees(o.amount)) + '</span><span class="st"><span class="late">' + o.daysLate + ' din late</span>' +
